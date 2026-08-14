@@ -21,6 +21,25 @@ export interface UsageDetails {
   cache_read_input_tokens?: number
   /** Prompt tokens written into the provider's cache. */
   cache_creation_input_tokens?: number
+  /**
+   * Reasoning tokens, reported as a BREAKDOWN of {@link output} rather than an
+   * addition to it.
+   *
+   * The key deliberately contains neither `input` nor `output`: Litefuse sums
+   * every key containing `input` into the input figure and every key containing
+   * `output` into the output figure, so the ecosystem's `output_reasoning`
+   * spelling would report these tokens twice — the provider already counts
+   * them inside its completion total.
+   */
+  reasoning?: number
+  /**
+   * Billed total, supplied explicitly.
+   *
+   * Litefuse otherwise derives it by summing every provided key, which would
+   * add {@link reasoning} on top of the completion tokens that already contain
+   * it. Providing the figure keeps the breakdown visible and the total honest.
+   */
+  total?: number
 }
 
 /** A value serialized for a Litefuse `input`/`output` attribute. */
@@ -97,24 +116,32 @@ export function assistantOutput(blocks: readonly ContentBlock[]): unknown {
  * Map harness token accounting onto the Anthropic-style keys Litefuse prices.
  *
  * The harness reports disjoint counts — `inputTokens` excludes cache hits — so
- * the three prompt keys add up to billed input with no adjustment. Reasoning
- * tokens are a subset of `outputTokens` and are deliberately left out of the
- * usage map: repeating them would inflate the total Litefuse derives.
+ * the three prompt keys add up to billed input with no adjustment. Reasoning is
+ * a breakdown of the completion tokens, not an addition to them, so it travels
+ * under a key Litefuse's input/output classifier ignores and the billed total
+ * is supplied explicitly rather than derived by summing every key.
  * @param usage - the step's accounting, when the adapter reported any.
  * @returns the usage map, or `undefined` when nothing was reported.
  */
 export function usageDetails(usage: TokenUsage | undefined): UsageDetails | undefined {
   if (usage === undefined) return undefined
   const details: UsageDetails = {}
-  if (usage.inputTokens > 0) details.input = usage.inputTokens
-  if (usage.outputTokens > 0) details.output = usage.outputTokens
+  let total = 0
+  if (usage.inputTokens > 0) total += (details.input = usage.inputTokens)
+  if (usage.outputTokens > 0) total += (details.output = usage.outputTokens)
   if (usage.cacheReadTokens !== undefined && usage.cacheReadTokens > 0) {
-    details.cache_read_input_tokens = usage.cacheReadTokens
+    total += (details.cache_read_input_tokens = usage.cacheReadTokens)
   }
   if (usage.cacheWriteTokens !== undefined && usage.cacheWriteTokens > 0) {
-    details.cache_creation_input_tokens = usage.cacheWriteTokens
+    total += (details.cache_creation_input_tokens = usage.cacheWriteTokens)
   }
-  return Object.keys(details).length === 0 ? undefined : details
+  if (Object.keys(details).length === 0) return undefined
+  // Assigned after the sum so the breakdown never joins the billed figure.
+  if (usage.reasoningTokens !== undefined && usage.reasoningTokens > 0) {
+    details.reasoning = usage.reasoningTokens
+  }
+  details.total = total
+  return details
 }
 
 /**

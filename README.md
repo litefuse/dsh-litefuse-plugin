@@ -112,7 +112,9 @@ All metadata is flat under one `agent_` prefix — never a per-agent namespace �
 
 Metadata rides as **per-key span attributes** (`langfuse.observation.metadata.agent_step_index`), not as one serialized blob. A JSON string would be stored verbatim beside its parsed copy, leaving JSON nested inside a string in the raw attribute set, and the trace spec forbids pre-serialized JSON as a metadata value because flattening it server-side corrupts the escaping.
 
-Token counts map onto the Anthropic-style keys Litefuse prices from: `input`, `output`, `cache_read_input_tokens`, `cache_creation_input_tokens`. The harness reports these disjointly, so they sum to billed input with no adjustment. Reasoning tokens are a subset of output and stay in metadata rather than inflating the usage total.
+Token counts map onto the Anthropic-style keys Litefuse prices from: `input`, `output`, `cache_read_input_tokens`, `cache_creation_input_tokens`. The harness reports these disjointly, so they sum to billed input with no adjustment.
+
+**Reasoning tokens ride as `reasoning`, plus an explicit `total`.** Litefuse sums every usage key containing `input` into the input figure, every key containing `output` into the output figure, and — unless you supply `total` — every key into the billed total. A provider already counts reasoning inside its completion tokens, so the ecosystem's `output_reasoning` spelling would bill them twice. Naming the key `reasoning` puts it in the breakdown's *Other* section, and supplying `total` keeps the billed figure equal to input + output + cache. The result matches what the harness's own Trajectory view shows: `1028 output = 677 reasoning + 351 content`.
 
 **The token rollup is metadata only.** An `agent` span — turn root or subagent container — carries the totals for itself and everything nested beneath it as `agent_*_tokens`, but never as `usage_details`. Litefuse prices a trace by summing its observations, so a container that also declared its children's tokens would double the bill. Read `agent_total_tokens` on the root for "how big was this turn"; read `totalCost` for what it cost.
 

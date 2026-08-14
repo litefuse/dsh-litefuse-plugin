@@ -84,6 +84,10 @@ describe('trace assembly', () => {
       output: 20,
       cache_read_input_tokens: 900,
       cache_creation_input_tokens: 12,
+      // A breakdown of `output`, under a key Litefuse's classifier ignores, so
+      // the reported total stays the billed 1032 rather than 1039.
+      reasoning: 7,
+      total: 1032,
     })
     expect(attribute(plan, 'langfuse.observation.model.name')).toBe('deepseek-chat')
     expect(metadataOf(plan)['agent_reasoning_tokens']).toBe(7)

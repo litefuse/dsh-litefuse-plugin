@@ -181,7 +181,7 @@ describe('plugin composition', () => {
     expect(generation.kind).toBe(1)
     expect(Number(generation.endTimeUnixNano)).toBeGreaterThanOrEqual(Number(generation.startTimeUnixNano))
     expect(attributeOf(generation, 'langfuse.observation.type')).toBe('generation')
-    expect(attributeOf(generation, 'langfuse.observation.usage_details')).toBe('{"input":12,"output":4}')
+    expect(attributeOf(generation, 'langfuse.observation.usage_details')).toBe('{"input":12,"output":4,"total":16}')
     expect(attributeOf(root, 'langfuse.trace.output')).toBe('I cannot tell.')
     expect(attributeOf(root, 'langfuse.environment')).toBe('test')
   })
