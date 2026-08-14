@@ -1,0 +1,27 @@
+# dsh-litefuse: Litefuse observability as a profile patch layer.
+#
+# The plugin only listens on the session firehose, so it composes beside the
+# harness's own telemetry rows instead of replacing them — nothing else in the
+# profile is touched.
+#
+# Credentials are references, never values: put the project key pair in
+# ~/.dsh/.env (or the harness credential store) as
+#   LITEFUSE_PUBLIC_KEY=pk-lf-…
+#   LITEFUSE_SECRET_KEY=sk-lf-…
+# Self-hosted deployments override the endpoint with LITEFUSE_BASE_URL.
+# DSH_LITEFUSE_DISABLED (any non-empty value) turns exporting off without
+# uninstalling the layer.
+
+- insert:
+    - id: litefuse
+      name: 'dsh-litefuse'
+      config:
+        # Quoted: a bare leading `!` reads as a second YAML tag, and a bare
+        # `? :` ternary reads as YAML's explicit-key syntax.
+        enabled: !!js '!process.env.DSH_LITEFUSE_DISABLED'
+        baseUrl: !!js process.env.LITEFUSE_BASE_URL || process.env.LITEFUSE_HOST || 'https://litefuse.cloud'
+        environment: !!js process.env.LITEFUSE_TRACING_ENVIRONMENT || 'production'
+        userId: !!js process.env.LITEFUSE_USER_ID
+        agentName: DeepSeek Harness
+        tags: [dsh]
+        requestInput: full
