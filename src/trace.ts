@@ -856,34 +856,29 @@ function mergeUsage(target: ScopeUsage, source: ScopeUsage): void {
 }
 
 /**
- * Emit one metadata map BOTH ways: per-key attributes under the namespace, and
- * the whole map as one JSON string on the namespace itself.
+ * Spread one metadata map into per-key span attributes under the uniform
+ * `agent_` prefix.
  *
- * The uniform `agent_` prefix — never a per-agent namespace — is what lets a
- * single Litefuse dashboard query span every agent integration, and absent
- * fields are dropped rather than padded with nulls.
+ * One shared prefix — never a per-agent namespace — is what lets a single
+ * Litefuse dashboard query span every agent integration, and absent fields are
+ * dropped rather than padded with nulls.
  *
- * Both forms are sent because the server documents both and merges whatever it
- * finds (`{...topLevelMetadata, ...langfuseMetadata}`), so duplicate keys
- * carrying identical values are a no-op. Sending both costs one attribute and
- * removes a whole class of reader disagreement from consideration when a
- * surface renders no metadata — the public API and the trace-detail UI read
- * from different stores, and only one of them was ever in question here.
+ * Per-key attributes, not one serialized blob: the trace spec forbids a
+ * pre-serialized JSON string as a metadata value because flattening it
+ * server-side corrupts the escaping, and the blob is stored verbatim beside its
+ * parsed copy, leaving JSON nested inside a string in the raw attribute set.
+ * The server accepts either form and merges what it finds, so this is the
+ * cleaner half of a choice, not a compatibility risk.
  * @param namespace - `langfuse.observation.metadata` or `langfuse.trace.metadata`.
  * @param fields - metadata entries without their prefix.
  * @returns attributes ready to spread onto a span.
  */
 function metadata(namespace: string, fields: Record<string, unknown>): Attributes {
   const attributes: Attributes = {}
-  const serialized: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(fields)) {
     if (value === undefined) continue
-    const prefixed = `agent_${key}`
-    attributes[`${namespace}.${prefixed}`] = value as SpanAttributeValue
-    serialized[prefixed] = value
+    attributes[`${namespace}.agent_${key}`] = value as SpanAttributeValue
   }
-  if (Object.keys(serialized).length === 0) return attributes
-  attributes[namespace] = JSON.stringify(serialized)
   return attributes
 }
 

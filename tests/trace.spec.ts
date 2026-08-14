@@ -126,19 +126,19 @@ describe('trace assembly', () => {
       .toEqual({ temperature: 0.2, maxTokens: 4096 })
   })
 
-  it('sends metadata both per key and serialized, because the server has two readers', async () => {
+  it('sends metadata per key, never as a serialized blob', async () => {
     const { ctx, spans } = await observe()
     runToolTurn(new TurnWriter(createSession(ctx), 1))
 
-    const plan = spans[0]!
-    const serialized = JSON.parse(attribute(plan, 'langfuse.observation.metadata')!) as Record<string, unknown>
-    // The two forms must agree: the ingestion processor merges them, and a
-    // disagreement would surface as different values in the API and the UI.
-    expect(serialized).toEqual(metadataOf(plan))
-    expect(serialized['agent_step_index']).toBe(1)
-
-    const root = spans[3]!
-    expect(JSON.parse(attribute(root, 'langfuse.trace.metadata')!)).toEqual(traceMetadataOf(root))
+    for (const span of spans) {
+      // The namespace itself must stay unset: a JSON string there is stored
+      // verbatim beside its parsed copy, which is the nested-JSON-in-a-string
+      // the trace spec forbids as a metadata value.
+      expect(span.attributes['langfuse.observation.metadata']).toBeUndefined()
+      expect(span.attributes['langfuse.trace.metadata']).toBeUndefined()
+    }
+    expect(metadataOf(spans[0]!)['agent_step_index']).toBe(1)
+    expect(traceMetadataOf(spans[3]!)['agent_turn_number']).toBe(1)
   })
 
   it('numbers generations and tools in one shared sequence and links a tool to its plan', async () => {
