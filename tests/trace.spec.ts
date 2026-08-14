@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import { TraceAssembler, type AssemblerOptions } from '../src/trace.js'
 import type { LitefuseSpan } from '../src/otlp.js'
-import { attribute, call, createContext, createSession, metadataOf, TurnWriter } from './fixture.js'
+import { attribute, call, createContext, createSession, metadataOf, traceMetadataOf, TurnWriter } from './fixture.js'
 
 const OPTIONS: AssemblerOptions = {
   agentName: 'DeepSeek Harness',
@@ -124,6 +124,21 @@ describe('trace assembly', () => {
     }
     expect(JSON.parse(attribute(spans[0]!, 'langfuse.observation.model.parameters')!))
       .toEqual({ temperature: 0.2, maxTokens: 4096 })
+  })
+
+  it('sends metadata both per key and serialized, because the server has two readers', async () => {
+    const { ctx, spans } = await observe()
+    runToolTurn(new TurnWriter(createSession(ctx), 1))
+
+    const plan = spans[0]!
+    const serialized = JSON.parse(attribute(plan, 'langfuse.observation.metadata')!) as Record<string, unknown>
+    // The two forms must agree: the ingestion processor merges them, and a
+    // disagreement would surface as different values in the API and the UI.
+    expect(serialized).toEqual(metadataOf(plan))
+    expect(serialized['agent_step_index']).toBe(1)
+
+    const root = spans[3]!
+    expect(JSON.parse(attribute(root, 'langfuse.trace.metadata')!)).toEqual(traceMetadataOf(root))
   })
 
   it('numbers generations and tools in one shared sequence and links a tool to its plan', async () => {

@@ -45,6 +45,7 @@ export function traceMetadataOf(span: LitefuseSpan): Record<string, unknown> {
 function metadataUnder(span: LitefuseSpan, namespace: string): Record<string, unknown> {
   const fields: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(span.attributes)) {
+    // The namespace itself carries the serialized copy, not a field.
     if (key.startsWith(`${namespace}.`)) fields[key.slice(namespace.length + 1)] = value
   }
   return fields
