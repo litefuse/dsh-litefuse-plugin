@@ -31,10 +31,23 @@ export async function createContext(): Promise<Context> {
   return ctx
 }
 
-/** Read every metadata field off one emitted span. */
+/** Read every observation-metadata field off one emitted span, prefix stripped. */
 export function metadataOf(span: LitefuseSpan): Record<string, unknown> {
-  const raw = span.attributes['langfuse.observation.metadata']
-  return typeof raw === 'string' ? JSON.parse(raw) as Record<string, unknown> : {}
+  return metadataUnder(span, 'langfuse.observation.metadata')
+}
+
+/** Read every trace-metadata field off one emitted span, prefix stripped. */
+export function traceMetadataOf(span: LitefuseSpan): Record<string, unknown> {
+  return metadataUnder(span, 'langfuse.trace.metadata')
+}
+
+/** Collect the per-key metadata attributes under one namespace. */
+function metadataUnder(span: LitefuseSpan, namespace: string): Record<string, unknown> {
+  const fields: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(span.attributes)) {
+    if (key.startsWith(`${namespace}.`)) fields[key.slice(namespace.length + 1)] = value
+  }
+  return fields
 }
 
 /** Read one Langfuse attribute as a string. */

@@ -106,11 +106,15 @@ A child that starts with no delegation call in flight — a background or contin
 
 All metadata is flat under one `agent_` prefix — never a per-agent namespace — so a single Litefuse dashboard query works across every agent integration. Absent fields are omitted rather than padded with nulls.
 
-- **Root**: `agent_turn_number`, `agent_session_id`, `agent_parent_session_id`, `agent_cwd`, `agent_provider`, `agent_model`, `agent_api_calls`, `agent_tool_calls`, `agent_steps`, `agent_duration_ms`, `agent_context_window`, `agent_end_reason`, `agent_subagent`
+- **Root and subagent container**: `agent_turn_number`, `agent_session_id`, `agent_parent_session_id`, `agent_cwd`, `agent_provider`, `agent_model`, `agent_api_calls`, `agent_tool_calls`, `agent_steps`, `agent_duration_ms`, `agent_context_window`, `agent_end_reason`, `agent_subagent`, plus the token rollup `agent_input_tokens` / `agent_output_tokens` / `agent_cache_read_tokens` / `agent_cache_write_tokens` / `agent_reasoning_tokens` / `agent_total_tokens` / `agent_accounted_generations`
 - **Generation**: `agent_step_index`, `agent_api_duration_ms`, `agent_time_to_first_token_ms`, `agent_tool_call_count`, `agent_thinking_chars`, `agent_reasoning_tokens`, `agent_input_scope`, truncation flags
 - **Tool**: `agent_tool_name`, `agent_tool_call_id`, `agent_step_index`, `agent_plan_step`, `agent_duration_ms`, `agent_is_error`, `agent_error_code`, `agent_subagent_count`, truncation flags
 
+Metadata rides as **per-key span attributes** (`langfuse.observation.metadata.agent_step_index`), not as one serialized blob. A JSON string would be stored verbatim beside its parsed copy, leaving JSON nested inside a string in the raw attribute set, and the trace spec forbids pre-serialized JSON as a metadata value because flattening it server-side corrupts the escaping.
+
 Token counts map onto the Anthropic-style keys Litefuse prices from: `input`, `output`, `cache_read_input_tokens`, `cache_creation_input_tokens`. The harness reports these disjointly, so they sum to billed input with no adjustment. Reasoning tokens are a subset of output and stay in metadata rather than inflating the usage total.
+
+**The token rollup is metadata only.** An `agent` span — turn root or subagent container — carries the totals for itself and everything nested beneath it as `agent_*_tokens`, but never as `usage_details`. Litefuse prices a trace by summing its observations, so a container that also declared its children's tokens would double the bill. Read `agent_total_tokens` on the root for "how big was this turn"; read `totalCost` for what it cost.
 
 ## Configuration
 
