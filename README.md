@@ -18,6 +18,8 @@ DeepSeek Harness — Turn 3            AGENT      1.9s   input: "why is the buil
 └── response                         GENERATION 1.1s   output: the final answer
 ```
 
+Zero runtime dependencies — no Langfuse SDK. Spans go straight to the OTLP endpoint, declaring `x-langfuse-ingestion-version: 4`, the documented opt-in for a custom exporter that writes complete spans inline.
+
 Unlike the file-tailing collectors Litefuse ships for other agents, this one runs **in-process** on the harness's own session event stream, so it records what actually happened rather than what a transcript could be reconstructed to mean: true per-call latency, time to first token, tool durations, disjoint cache-token accounting, and the exact request each generation was sent.
 
 ## Install

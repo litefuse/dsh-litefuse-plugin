@@ -74,20 +74,21 @@ describe('trace assembly', () => {
     expect(attribute(spans[3]!, 'langfuse.trace.output')).toBe('The directory is empty.')
   })
 
-  it('maps token accounting onto the Anthropic-style keys and leaves reasoning out of the total', async () => {
+  it('splits reasoning out of the completion total, as the Litefuse classifier expects', async () => {
     const { ctx, spans } = await observe()
     runToolTurn(new TurnWriter(createSession(ctx), 1))
 
     const plan = spans[0]!
+    // `output` carries completion MINUS reasoning, and the two sum back to the
+    // 20 the adapter reported. Litefuse adds up every key containing `output`,
+    // and its own ingestion processor normalizes provider payloads the same
+    // way, so this split is what makes the displayed figure the billed one.
     expect(JSON.parse(attribute(plan, 'langfuse.observation.usage_details')!)).toEqual({
       input: 100,
-      output: 20,
+      output: 13,
+      output_reasoning_tokens: 7,
       cache_read_input_tokens: 900,
       cache_creation_input_tokens: 12,
-      // A breakdown of `output`, under a key Litefuse's classifier ignores, so
-      // the reported total stays the billed 1032 rather than 1039.
-      reasoning: 7,
-      total: 1032,
     })
     expect(attribute(plan, 'langfuse.observation.model.name')).toBe('deepseek-chat')
     expect(metadataOf(plan)['agent_reasoning_tokens']).toBe(7)

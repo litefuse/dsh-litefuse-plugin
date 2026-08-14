@@ -13,6 +13,7 @@ import { createSession, TurnWriter } from './fixture.js'
 /** One captured OTLP request. */
 interface Capture {
   path: string
+  ingestionVersion: string | undefined
   authorization: string | undefined
   contentType: string | undefined
   payload: OtlpPayload
@@ -52,6 +53,7 @@ class FakeLitefuse {
       request.on('end', () => {
         this.captures.push({
           path: request.url ?? '',
+          ingestionVersion: request.headers['x-langfuse-ingestion-version'] as string | undefined,
           authorization: request.headers.authorization,
           contentType: request.headers['content-type'],
           payload: JSON.parse(Buffer.concat(chunks).toString()) as OtlpPayload,
@@ -181,7 +183,9 @@ describe('plugin composition', () => {
     expect(generation.kind).toBe(1)
     expect(Number(generation.endTimeUnixNano)).toBeGreaterThanOrEqual(Number(generation.startTimeUnixNano))
     expect(attributeOf(generation, 'langfuse.observation.type')).toBe('generation')
-    expect(attributeOf(generation, 'langfuse.observation.usage_details')).toBe('{"input":12,"output":4,"total":16}')
+    expect(attributeOf(generation, 'langfuse.observation.usage_details')).toBe('{"input":12,"output":4}')
+    // The ingest gate rejects clients that cannot emit complete spans inline.
+    expect(fake.captures[0]!.ingestionVersion).toBe('4')
     expect(attributeOf(root, 'langfuse.trace.output')).toBe('I cannot tell.')
     expect(attributeOf(root, 'langfuse.environment')).toBe('test')
   })

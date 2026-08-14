@@ -451,9 +451,11 @@ export class TraceAssembler {
         'langfuse.observation.type': 'generation',
         'langfuse.observation.model.name': state.model,
         'langfuse.observation.model_parameters': jsonOrUndefined(state.modelParameters),
+        // A bare ISO string: the server treats a JSON-quoted timestamp as a
+        // legacy quirk it parses defensively, not as the expected form.
         'langfuse.observation.completion_start_time': generation.completionStartMillis === undefined
           ? undefined
-          : JSON.stringify(new Date(generation.completionStartMillis).toISOString()),
+          : new Date(generation.completionStartMillis).toISOString(),
         'langfuse.observation.input': input?.text,
         'langfuse.observation.output': output.text.length === 0 ? undefined : output.text,
         'langfuse.observation.usage_details': jsonOrUndefined(usageDetails(usage)),

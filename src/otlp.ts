@@ -58,6 +58,17 @@ interface OtlpKeyValue {
 /** Path appended to the configured base URL to reach the Litefuse OTLP trace ingest. */
 export const LITEFUSE_TRACES_PATH = '/api/public/otel/v1/traces'
 
+/**
+ * Ingestion protocol this exporter speaks, declared per request.
+ *
+ * Litefuse gates its trace ingest on client capability and rejects anything
+ * older with HTTP 400. The gate accepts either a first-party SDK new enough to
+ * emit complete spans inline, or this header as the documented opt-in for a
+ * custom OTel exporter. The claim is accurate here: every span is written once,
+ * when the observation ends, with no create-then-update split.
+ */
+const INGESTION_VERSION = '4'
+
 /** Span kind `INTERNAL`; every observation is in-process work of this harness. */
 const SPAN_KIND_INTERNAL = 1
 
@@ -278,6 +289,7 @@ export class LitefuseSpanExporter {
         headers: {
           'authorization': `Basic ${authorization}`,
           'content-type': 'application/json',
+          'x-langfuse-ingestion-version': INGESTION_VERSION,
         },
         body,
         signal: AbortSignal.timeout(this.options.requestTimeoutMillis),

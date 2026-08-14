@@ -11,35 +11,28 @@
 
 import type { ContentBlock, TokenUsage, ToolCallBlock } from '@deepseek-ai/dsh-llm'
 
-/** Anthropic-style usage keys, the shape Litefuse maps to cost. */
+/** Usage keys in the spelling Litefuse's classifier and price table expect. */
 export interface UsageDetails {
   /** Uncached prompt tokens. */
   input?: number
-  /** Completion tokens, reasoning included. */
+  /**
+   * Completion tokens EXCLUDING reasoning, which travels as its own sibling
+   * key. This is the ecosystem's split, not a choice: Litefuse sums every key
+   * containing `output` into the output figure, and its own ingestion
+   * processor normalizes provider payloads by subtracting reasoning out of
+   * `output` for exactly that reason.
+   */
   output?: number
   /** Prompt tokens served from the provider's cache. */
   cache_read_input_tokens?: number
   /** Prompt tokens written into the provider's cache. */
   cache_creation_input_tokens?: number
   /**
-   * Reasoning tokens, reported as a BREAKDOWN of {@link output} rather than an
-   * addition to it.
-   *
-   * The key deliberately contains neither `input` nor `output`: Litefuse sums
-   * every key containing `input` into the input figure and every key containing
-   * `output` into the output figure, so the ecosystem's `output_reasoning`
-   * spelling would report these tokens twice — the provider already counts
-   * them inside its completion total.
+   * Reasoning tokens, the other half of the completion total. The shipped
+   * price table prices this key beside `output`, so splitting the two keeps
+   * both the displayed breakdown and the computed cost right.
    */
-  reasoning?: number
-  /**
-   * Billed total, supplied explicitly.
-   *
-   * Litefuse otherwise derives it by summing every provided key, which would
-   * add {@link reasoning} on top of the completion tokens that already contain
-   * it. Providing the figure keeps the breakdown visible and the total honest.
-   */
-  total?: number
+  output_reasoning_tokens?: number
 }
 
 /** A value serialized for a Litefuse `input`/`output` attribute. */
@@ -113,35 +106,33 @@ export function assistantOutput(blocks: readonly ContentBlock[]): unknown {
 }
 
 /**
- * Map harness token accounting onto the Anthropic-style keys Litefuse prices.
+ * Map harness token accounting onto the keys Litefuse prices and displays.
  *
- * The harness reports disjoint counts — `inputTokens` excludes cache hits — so
- * the three prompt keys add up to billed input with no adjustment. Reasoning is
- * a breakdown of the completion tokens, not an addition to them, so it travels
- * under a key Litefuse's input/output classifier ignores and the billed total
- * is supplied explicitly rather than derived by summing every key.
+ * The harness reports disjoint prompt counts — `inputTokens` excludes cache
+ * hits — so the three prompt keys add up to billed input with no adjustment.
+ * Completion is the opposite: `outputTokens` INCLUDES reasoning, while Litefuse
+ * expects the two as siblings that sum to the completion total, so reasoning is
+ * subtracted back out of `output` here.
  * @param usage - the step's accounting, when the adapter reported any.
  * @returns the usage map, or `undefined` when nothing was reported.
  */
 export function usageDetails(usage: TokenUsage | undefined): UsageDetails | undefined {
   if (usage === undefined) return undefined
   const details: UsageDetails = {}
-  let total = 0
-  if (usage.inputTokens > 0) total += (details.input = usage.inputTokens)
-  if (usage.outputTokens > 0) total += (details.output = usage.outputTokens)
+  const reasoning = usage.reasoningTokens ?? 0
+  if (usage.inputTokens > 0) details.input = usage.inputTokens
+  // Clamped: a provider that reported reasoning larger than its own completion
+  // total would otherwise produce a negative token count.
+  const content = Math.max(usage.outputTokens - reasoning, 0)
+  if (content > 0) details.output = content
+  if (reasoning > 0) details.output_reasoning_tokens = reasoning
   if (usage.cacheReadTokens !== undefined && usage.cacheReadTokens > 0) {
-    total += (details.cache_read_input_tokens = usage.cacheReadTokens)
+    details.cache_read_input_tokens = usage.cacheReadTokens
   }
   if (usage.cacheWriteTokens !== undefined && usage.cacheWriteTokens > 0) {
-    total += (details.cache_creation_input_tokens = usage.cacheWriteTokens)
+    details.cache_creation_input_tokens = usage.cacheWriteTokens
   }
-  if (Object.keys(details).length === 0) return undefined
-  // Assigned after the sum so the breakdown never joins the billed figure.
-  if (usage.reasoningTokens !== undefined && usage.reasoningTokens > 0) {
-    details.reasoning = usage.reasoningTokens
-  }
-  details.total = total
-  return details
+  return Object.keys(details).length === 0 ? undefined : details
 }
 
 /**
