@@ -450,7 +450,9 @@ export class TraceAssembler {
         ...this.commonAttributes(state, scope),
         'langfuse.observation.type': 'generation',
         'langfuse.observation.model.name': state.model,
-        'langfuse.observation.model_parameters': jsonOrUndefined(state.modelParameters),
+        // `model.parameters`, matching `model.name`: the underscore spelling
+        // some integrations use matches no server constant and is dropped whole.
+        'langfuse.observation.model.parameters': jsonOrUndefined(state.modelParameters),
         // A bare ISO string: the server treats a JSON-quoted timestamp as a
         // legacy quirk it parses defensively, not as the expected form.
         'langfuse.observation.completion_start_time': generation.completionStartMillis === undefined

@@ -94,6 +94,38 @@ describe('trace assembly', () => {
     expect(metadataOf(plan)['agent_reasoning_tokens']).toBe(7)
   })
 
+  it('emits only attribute names the Litefuse ingest recognizes', async () => {
+    const { ctx, spans } = await observe()
+    runToolTurn(new TurnWriter(createSession(ctx), 1))
+
+    // Pinned against packages/shared/src/server/otel/attributes.ts. A name the
+    // server has no constant for is not a partial failure — the whole field is
+    // dropped, silently, which is how `model_parameters` reached production
+    // reporting an empty object.
+    const RECOGNIZED = new Set([
+      'langfuse.environment',
+      'langfuse.release',
+      'langfuse.trace.name', 'langfuse.trace.input', 'langfuse.trace.output',
+      'langfuse.trace.tags', 'langfuse.trace.metadata',
+      'langfuse.observation.type', 'langfuse.observation.input', 'langfuse.observation.output',
+      'langfuse.observation.level', 'langfuse.observation.status_message',
+      'langfuse.observation.metadata',
+      'langfuse.observation.model.name', 'langfuse.observation.model.parameters',
+      'langfuse.observation.usage_details', 'langfuse.observation.cost_details',
+      'langfuse.observation.completion_start_time',
+      'session.id', 'user.id',
+    ])
+    for (const span of spans) {
+      for (const key of Object.keys(span.attributes)) {
+        // Metadata is addressed per key beneath its namespace.
+        const base = key.replace(/^(langfuse\.(?:trace|observation)\.metadata)\..+$/, '$1')
+        expect(RECOGNIZED, `unrecognized attribute ${key}`).toContain(base)
+      }
+    }
+    expect(JSON.parse(attribute(spans[0]!, 'langfuse.observation.model.parameters')!))
+      .toEqual({ temperature: 0.2, maxTokens: 4096 })
+  })
+
   it('numbers generations and tools in one shared sequence and links a tool to its plan', async () => {
     const { ctx, spans } = await observe()
     runToolTurn(new TurnWriter(createSession(ctx), 1))
