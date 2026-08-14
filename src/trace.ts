@@ -863,13 +863,12 @@ function mergeUsage(target: ScopeUsage, source: ScopeUsage): void {
  * single Litefuse dashboard query span every agent integration, and absent
  * fields are dropped rather than padded with nulls.
  *
- * Both forms are sent because the server has two readers. Its ingestion
- * processor merges them (`{...topLevelMetadata, ...langfuseMetadata}`), so
- * duplicate keys carrying identical values are harmless. The trace-detail UI
- * loads observation metadata through a separate path that appears to read only
- * the serialized form: sending per-key alone left that panel empty while the
- * public API returned every field. Until the two readers agree, sending both is
- * the only form that populates both.
+ * Both forms are sent because the server documents both and merges whatever it
+ * finds (`{...topLevelMetadata, ...langfuseMetadata}`), so duplicate keys
+ * carrying identical values are a no-op. Sending both costs one attribute and
+ * removes a whole class of reader disagreement from consideration when a
+ * surface renders no metadata — the public API and the trace-detail UI read
+ * from different stores, and only one of them was ever in question here.
  * @param namespace - `langfuse.observation.metadata` or `langfuse.trace.metadata`.
  * @param fields - metadata entries without their prefix.
  * @returns attributes ready to spread onto a span.
