@@ -1,0 +1,42 @@
+name: Release
+
+# Publishing is a tag push: `npm version <patch|minor|major> && git push --follow-tags`.
+# The tag is the trigger, so a release always ships the exact commit it names.
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Lets npm attach a provenance attestation linking the tarball to this
+      # workflow run and commit, and is what Trusted Publishing authenticates
+      # with when the package is configured for it.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      # Refuse to publish a tag that disagrees with the manifest, so the
+      # registry version and the git tag can never drift apart.
+      - name: Check the tag matches package.json
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG=$(node -p "require('./package.json').version")
+          if [ "$TAG" != "$PKG" ]; then
+            echo "tag v$TAG does not match package.json $PKG"
+            exit 1
+          fi
+      # `prepack` builds, so the tarball carries lib/ and the installer never
+      # compiles anything.
+      - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

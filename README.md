@@ -67,7 +67,7 @@ A working install prints its endpoint at boot, one line per finished turn, and o
 [debug] sent 4 span(s) -> https://litefuse.cloud/api/public/otel/v1/traces HTTP 200
 ```
 
-Open <https://litefuse.cloud> → your project → **Traces**. Traces appear as soon as a turn's *first* observation completes, not at turn end.
+Open <https://litefuse.cloud> → your project → **Tracing**. Traces appear as soon as a turn's *first* span completes, not at turn end.
 
 If nothing arrives, that log names the reason — missing credentials, an HTTP status, or a transport error. A `totalCost` of 0 in the UI is not a collection problem: it means the project has no price entry for your model (**Settings → Models**).
 
@@ -94,7 +94,7 @@ The plugin subscribes to `session/event`, the harness's post-commit append feed,
 | `compaction/end` | a `context compaction` event, which explains the next call's token drop |
 | a child session whose parent has a delegation call in flight | a `subagent` container under that call's tool span |
 
-Observations mount **flat** under their container; the only depth is a real subagent run. Generations and tools share one step counter, so `#N` is a single chronological sequence and `tool.agent_plan_step == generation.agent_step_index` joins a tool back to the call that requested it.
+Spans mount **flat** under their container; the only depth is a real subagent run. Generations and tools share one step counter, so `#N` is a single chronological sequence and `tool.agent_plan_step == generation.agent_step_index` joins a tool back to the call that requested it.
 
 Each span is written **once, when it ends** — OTel spans are immutable, so an in-flight step is deliberately invisible until it closes. Trace-level attributes ride on every span, which is what lets a trace appear before its root does.
 
@@ -118,7 +118,7 @@ Token counts use the keys Litefuse prices and classifies from: `input`, `output`
 
 **Reasoning tokens ride as `reasoning`, plus an explicit `total`.** Litefuse sums every usage key containing `input` into the input figure, every key containing `output` into the output figure, and — unless you supply `total` — every key into the billed total. A provider already counts reasoning inside its completion tokens, so the ecosystem's `output_reasoning` spelling would bill them twice. Naming the key `reasoning` puts it in the breakdown's *Other* section, and supplying `total` keeps the billed figure equal to input + output + cache. The result matches what the harness's own Trajectory view shows: `1028 output = 677 reasoning + 351 content`.
 
-**The token rollup is metadata only.** An `agent` span — turn root or subagent container — carries the totals for itself and everything nested beneath it as `agent_*_tokens`, but never as `usage_details`. Litefuse prices a trace by summing its observations, so a container that also declared its children's tokens would double the bill. Read `agent_total_tokens` on the root for "how big was this turn"; read `totalCost` for what it cost.
+**The token rollup is metadata only.** An `agent` span — turn root or subagent container — carries the totals for itself and everything nested beneath it as `agent_*_tokens`, but never as `usage_details`. Litefuse prices a trace by summing its spans, so a container that also declared its children's tokens would double the bill. Read `agent_total_tokens` on the root for "how big was this turn"; read `totalCost` for what it cost.
 
 ## Configuration
 
@@ -173,6 +173,24 @@ Credentials are **references, not values**: configuration names an environment v
 - **Parallel tool spans can overstate duration.** The harness commits tool results in model order, so a fast call that finishes behind a slow sibling records its result timestamp, not its own completion.
 - **`requestInput: full` folds the derived history per model call.** That is one pass over the session log per call — negligible beside a model round trip, but `delta` exists for very long sessions.
 - **No durable outbox.** Spans buffered when the process dies are lost. Delivery is at-most-once by design; the session log remains the durable record.
+
+## Releasing
+
+Publishing is a tag push; CI builds, tests, and publishes with provenance.
+
+```bash
+npm version patch        # or minor / major — writes package.json and tags
+git push --follow-tags
+```
+
+The workflow refuses a tag that disagrees with `package.json`, and `prepack`
+builds before packing, so the tarball always carries `lib/` and installers never
+compile anything.
+
+First release only: publish once by hand (`npm publish --access public`) to
+create the package, then either add an `NPM_TOKEN` repository secret or
+configure npm Trusted Publishing for this workflow, which authenticates over
+OIDC and needs no token at all.
 
 ## Development
 
