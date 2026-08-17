@@ -103,11 +103,16 @@ type Binding =
  */
 interface Scope {
   /**
-   * Which trace this scope joins, resolved the first time anything asks and
-   * fixed from then on; `undefined` until then. Deliberately NOT decided at
-   * `turn/start`: for a delegated run, what identifies its delegating call is
-   * the prompt, which the harness delivers a moment later — and nothing reads a
-   * binding before then. See {@link TraceAssembler.resolveBinding}.
+   * Which trace this scope joins; `undefined` until that is settled, and fixed
+   * from then on.
+   *
+   * Settled at the earliest moment the evidence DETERMINES the answer, which is
+   * neither of the two obvious points. Not `turn/start`, because for a
+   * delegated run the identifying key may not have arrived — that would be a
+   * guess. Not first use either: a `continuable` delegation reports its tool
+   * result within milliseconds of starting the child, so a decision deferred
+   * that far finds no candidate call left and files the run as its own trace.
+   * See {@link TraceAssembler.settleBinding}.
    */
   binding: Binding | undefined
   /** This scope's own span id — the parent of every observation inside it. */
