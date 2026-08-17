@@ -169,6 +169,8 @@ Credentials are **references, not values**: configuration names an environment v
 
 **The trace header is repeated, so it stays small.** Every span carries the trace's name, tags, session, and user so the trace is queryable before its root is written. The input is the one header field with no natural size, and repeating it would charge a pasted file once per span, so what rides along is a 4096-character preview — the same text on every span, so whichever one the server folds into the trace record reads alike. The root `agent` span carries the input in full, up to `maxValueChars`.
 
+**It reports itself as an SDK scope.** Batches arrive under the instrumentation scope `langfuse-sdk-dsh-litefuse`. The prefix is what tells the ingest these spans are complete as sent; without it, the server assumes a generic OTel exporter that may not have populated the Langfuse attributes at all and copies the whole raw attribute map into each observation's metadata as `attributes`. That copy is redundant here — every attribute in it is already a first-class field — and unreadable, since it re-encodes the JSON strings that `model.parameters` and `usage_details` are required to be. It is the same claim `x-langfuse-ingestion-version: 4` makes on the wire.
+
 **It writes its own log.** A booted dsh profile composes no logger plugin, so `ctx.logger` output is invisible. The file at `$DSH_HOME/litefuse.log` is where this integration reports, matching what Litefuse's other integrations do.
 
 **No replay on load.** The plugin observes from the next `turn/start` onward. A turn already in flight when it loads is skipped rather than reconstructed, which is what keeps it from writing spans a previous process already sent.

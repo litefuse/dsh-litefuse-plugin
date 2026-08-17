@@ -29,6 +29,22 @@ const { version } = createRequire(import.meta.url)('../package.json') as { versi
 /** Cordis plugin name. */
 export const name = 'dsh-litefuse'
 
+/**
+ * Instrumentation scope reported with every batch.
+ *
+ * The `langfuse-sdk` prefix is load-bearing rather than decorative. A batch
+ * whose scope does not name an SDK is assumed to come from a generic OTel
+ * exporter that may not have populated the Langfuse attributes at all, so the
+ * ingest copies the span's whole raw attribute map into observation metadata as
+ * a fallback. For this exporter that copy is pure redundancy — every attribute
+ * in it is already a first-class field — and it is unreadable besides: the
+ * values re-encoded into it include the JSON strings that `model.parameters`
+ * and `usage_details` are required to be, which come back double-encoded.
+ * Declaring the prefix states what `x-langfuse-ingestion-version` already
+ * states on the wire: these spans are complete as sent.
+ */
+const SCOPE_NAME = `langfuse-sdk-${name}`
+
 /** The session store must exist before this plugin has anything to observe. */
 export const inject = ['sessions']
 
@@ -240,7 +256,7 @@ export function apply(ctx: Context, config: Config): void {
     onSuccess: message => log.debug(message),
   }, {
     resource: { 'service.name': 'deepseek-harness', 'service.version': version },
-    scopeName: name,
+    scopeName: SCOPE_NAME,
     scopeVersion: version,
   })
 

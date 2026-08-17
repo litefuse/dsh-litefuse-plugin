@@ -198,7 +198,11 @@ describe('plugin composition', () => {
     const payload = fake.captures[0]!.payload
     const resource = payload.resourceSpans[0]!.resource.attributes
     expect(resource.find(entry => entry.key === 'service.name')?.value['stringValue']).toBe('deepseek-harness')
-    expect(payload.resourceSpans[0]!.scopeSpans[0]!.scope.name).toBe('dsh-litefuse')
+    // The `langfuse-sdk` prefix is what tells the ingest these spans arrive
+    // complete, so it does not fall back to copying the raw attribute map into
+    // observation metadata. Renaming the scope without that prefix puts an
+    // unreadable duplicate of every attribute back on every observation.
+    expect(payload.resourceSpans[0]!.scopeSpans[0]!.scope.name).toBe('langfuse-sdk-dsh-litefuse')
   })
 
   it('writes each span exactly once', async () => {
