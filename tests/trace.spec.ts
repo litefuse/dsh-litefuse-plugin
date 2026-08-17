@@ -295,6 +295,39 @@ describe('trace assembly', () => {
     expect(metadataOf(generation)['agent_output_orig_len']).toBe(200)
   })
 
+  it('holds the trace input to the same budget as every other value', async () => {
+    const { ctx, spans } = await observe({ maxValueChars: 32 })
+    const writer = new TurnWriter(createSession(ctx), 1)
+    writer.start().prompt('p'.repeat(500)).header()
+    const step = writer.openStep()
+    writer.assistant(step, [{ type: 'text', text: 'ok' }])
+    writer.closeStep(step).end()
+
+    const root = spans[spans.length - 1]!
+    expect(attribute(root, 'langfuse.observation.input')).toHaveLength(33)
+    expect(metadataOf(root)['agent_input_truncated']).toBe(true)
+    expect(metadataOf(root)['agent_input_orig_len']).toBe(500)
+  })
+
+  it('repeats only a preview of the input across the turn, never the whole prompt', async () => {
+    // A pasted file is one value with no natural bound. The trace header rides
+    // on every span, so an unclipped input is paid for once per observation.
+    const { ctx, spans } = await observe({ maxValueChars: 1_000_000 })
+    const writer = new TurnWriter(createSession(ctx), 1)
+    writer.start().prompt('p'.repeat(50_000)).header()
+    const step = writer.openStep()
+    writer.assistant(step, [{ type: 'text', text: 'ok' }])
+    writer.closeStep(step).end()
+
+    const previews = new Set(spans.map(span => attribute(span, 'langfuse.trace.input')))
+    // One value, identical everywhere: whichever span the server folds into the
+    // trace record, the trace reads the same.
+    expect(previews.size).toBe(1)
+    expect([...previews][0]).toHaveLength(4_097)
+    // The root still carries the input in full, up to the configured budget.
+    expect(attribute(spans[spans.length - 1]!, 'langfuse.observation.input')).toHaveLength(50_000)
+  })
+
   it('ignores events for a turn it never saw open', async () => {
     const { ctx, spans } = await observe()
     const session = createSession(ctx)

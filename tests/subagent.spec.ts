@@ -154,6 +154,238 @@ describe('subagent subtree', () => {
     expect(spans.find(span => span.name === 'subagent')!.parentSpanId).toBe(delegation.spanId)
   })
 
+  it('sends each of two concurrent delegations to the child that answers it', async () => {
+    // The subagent tool's own prompt tells the model to start independent
+    // delegations together in one message, so this is the ordinary shape of a
+    // delegating turn — not an edge case. Both children reach `turn/start`
+    // while both calls are in flight; only the prompt tells them apart.
+    const { ctx, spans } = await observe()
+    const parent = new TurnWriter(createSession(ctx), 1)
+    parent.start().prompt('delegate two things').header()
+    const step = parent.openStep()
+    parent.assistant(step, [
+      { type: 'tool-call', id: call('pA'), name: 'subagent', arguments: '{"description":"A"}' },
+      { type: 'tool-call', id: call('pB'), name: 'subagent', arguments: '{"description":"B"}' },
+    ])
+    const seqA = parent.toolCall(step, 'pA', 'subagent', { description: 'A', prompt: 'read the changelog' })
+    const seqB = parent.toolCall(step, 'pB', 'subagent', { description: 'B', prompt: 'read the tests' })
+    // Started in call order, but each child is delivered its own prompt.
+    const childA = new TurnWriter(createSession(ctx, parent.session.id), 1)
+    const childB = new TurnWriter(createSession(ctx, parent.session.id), 1)
+    for (const [child, prompt, answer] of [
+      [childA, 'read the changelog', 'the changelog is current'],
+      [childB, 'read the tests', 'the tests pass'],
+    ] as const) {
+      child.start().prompt(prompt).header()
+      const childStep = child.openStep()
+      child.assistant(childStep, [{ type: 'text', text: answer }], { inputTokens: 30, outputTokens: 5 })
+      child.closeStep(childStep).end()
+    }
+    parent.toolResult(step, 'pA', seqA, 'the changelog is current')
+    parent.toolResult(step, 'pB', seqB, 'the tests pass').closeStep(step).end()
+
+    const delegations = spans.filter(span => span.name.startsWith('tool ('))
+    expect(delegations.map(span => span.name)).toEqual(['tool (1 subagent) #2', 'tool (1 subagent) #3'])
+    const containers = spans.filter(span => span.name === 'subagent')
+    expect(containers).toHaveLength(2)
+    // Each container answers its own call, and each call's own tokens follow it.
+    for (const [container, delegation] of containers.map((c, at) => [c, delegations[at]!] as const)) {
+      expect(container.parentSpanId).toBe(delegation.spanId)
+    }
+    expect(attribute(containers[0]!, 'langfuse.observation.output')).toBe('the changelog is current')
+    expect(attribute(containers[1]!, 'langfuse.observation.output')).toBe('the tests pass')
+  })
+
+  it('spreads two delegations of the same prompt across both calls', async () => {
+    // Identical prompts cannot be told apart by text, so they are told apart by
+    // how many children each call already holds. Landing both on one call would
+    // leave the other reporting a delegation that apparently did nothing.
+    const { ctx, spans } = await observe()
+    const parent = new TurnWriter(createSession(ctx), 1)
+    parent.start().prompt('ask twice').header()
+    const step = parent.openStep()
+    parent.assistant(step, [
+      { type: 'tool-call', id: call('p1'), name: 'subagent', arguments: '{}' },
+      { type: 'tool-call', id: call('p2'), name: 'subagent', arguments: '{}' },
+    ])
+    const seq1 = parent.toolCall(step, 'p1', 'subagent', { prompt: 'review the diff' })
+    const seq2 = parent.toolCall(step, 'p2', 'subagent', { prompt: 'review the diff' })
+    for (const answer of ['first opinion', 'second opinion']) {
+      const child = new TurnWriter(createSession(ctx, parent.session.id), 1)
+      child.start().prompt('review the diff').header()
+      const childStep = child.openStep()
+      child.assistant(childStep, [{ type: 'text', text: answer }], { inputTokens: 30, outputTokens: 5 })
+      child.closeStep(childStep).end()
+    }
+    parent.toolResult(step, 'p1', seq1, 'first opinion')
+    parent.toolResult(step, 'p2', seq2, 'second opinion').closeStep(step).end()
+
+    const delegations = spans.filter(span => span.name.startsWith('tool ('))
+    expect(delegations.map(span => span.name)).toEqual(['tool (1 subagent) #2', 'tool (1 subagent) #3'])
+  })
+
+  it('nests a continuable delegation whose call returns before the run starts', async () => {
+    // `continuable` resolves at acceptance: the tool result lands milliseconds
+    // after the child is created and long before it has done any work. So the
+    // call is gone by the time the child's own prompt is recorded — binding has
+    // to be settled from the descriptor — and the result is not the run's end.
+    const { ctx, spans } = await observe()
+    const parent = new TurnWriter(createSession(ctx), 1)
+    parent.start().prompt('delegate two levels').header()
+    const step = parent.openStep()
+    parent.assistant(step, [{ type: 'tool-call', id: call('p1'), name: 'subagent', arguments: '{}' }])
+    const seq = parent.toolCall(step, 'p1', 'subagent', { description: 'layer one', prompt: 'summarize the notes file' })
+
+    const child = new TurnWriter(createSession(ctx, parent.session.id), 1)
+    child.session.append('subagent/descriptor', {
+      version: 2, mode: 'continuable', provider: 'spawn', label: 'layer one',
+    })
+    child.start()
+    // "started subagent <id>" — the call reports acceptance and closes here.
+    parent.toolResult(step, 'p1', seq, 'started subagent 30b9f972').closeStep(step)
+    // Only now does the child receive its instruction and begin working.
+    child.prompt('summarize the notes file').header()
+    const childStep = child.openStep()
+    child.assistant(childStep, [{ type: 'text', text: 'the notes cover the release plan' }],
+      { inputTokens: 30, outputTokens: 5 })
+    child.closeStep(childStep).end()
+    const answerStep = parent.openStep()
+    parent.assistant(answerStep, [{ type: 'text', text: 'delegated' }], { inputTokens: 100, outputTokens: 10 })
+    parent.closeStep(answerStep).end()
+
+    const delegation = spans.find(span => span.name.startsWith('tool ('))!
+    expect(delegation.name).toBe('tool (1 subagent) #2')
+    const container = spans.find(span => span.name === 'subagent')!
+    expect(container.parentSpanId).toBe(delegation.spanId)
+    // The whole run is one trace: the result did not end the child, so its own
+    // work was still recorded rather than dropped with a closed scope.
+    const root = spans[spans.length - 1]!
+    expect(new Set(spans.map(span => span.traceId))).toEqual(new Set([root.traceId]))
+    expect(spans.map(span => span.name)).toContain('subagent response')
+    // Its tokens still roll into the turn that delegated it.
+    expect(metadataOf(root)['agent_input_tokens']).toBe(130)
+  })
+
+  it('reads a descriptor out of the constructor seed, which the firehose never publishes', async () => {
+    // A spawned child carries its descriptor at seq 0, inside the seed — and a
+    // seed is deliberately not republished on `session/event`, so the only way
+    // to see it is to read the log.
+    const { ctx, spans } = await observe()
+    const parent = new TurnWriter(createSession(ctx), 1)
+    parent.start().prompt('delegate').header()
+    const step = parent.openStep()
+    parent.assistant(step, [
+      { type: 'tool-call', id: call('pA'), name: 'subagent', arguments: '{}' },
+      { type: 'tool-call', id: call('pB'), name: 'subagent', arguments: '{}' },
+    ])
+    const seqA = parent.toolCall(step, 'pA', 'subagent', { description: 'count the sources' })
+    const seqB = parent.toolCall(step, 'pB', 'subagent', { description: 'count the tests' })
+    // Two calls in flight and no prompt yet: only the seeded label can say
+    // which one this run serves.
+    const seeded = ctx.sessions.create(undefined, {
+      meta: { cwd: '/workspace', parentSession: parent.session.id, origin: 'subagent' },
+      seed: [{
+        seq: 0,
+        time: Date.now(),
+        type: 'subagent/descriptor',
+        // The EARLIER call, so "most recently started" would answer wrongly.
+        data: { version: 2, mode: 'one-shot', provider: 'spawn', label: 'count the sources' },
+      }],
+    })
+    const child = new TurnWriter(seeded, 1)
+    child.start().prompt('count the sources').header()
+    const childStep = child.openStep()
+    child.assistant(childStep, [{ type: 'text', text: '9 sources' }], { inputTokens: 30, outputTokens: 5 })
+    child.closeStep(childStep).end()
+    parent.toolResult(step, 'pA', seqA, '9 sources')
+    parent.toolResult(step, 'pB', seqB, 'unused').closeStep(step).end()
+
+    const delegations = spans.filter(span => span.name.startsWith('tool ('))
+    // The run belongs to call A, the one whose description it was seeded with.
+    expect(delegations.map(span => span.name)).toEqual(['tool (1 subagent) #2'])
+    expect(spans.find(span => span.name === 'subagent')!.parentSpanId).toBe(delegations[0]!.spanId)
+  })
+
+  it('keeps a delegated run in one trace even when it writes before its prompt', async () => {
+    // The binding is resolved by whichever comes first — a span needing a trace
+    // id, or the prompt that names the call — and never revised, so a run
+    // cannot start in one trace and continue in another. Nothing here can be
+    // repaired after the fact: the first span is already on the wire.
+    const { ctx, spans } = await observe()
+    const parent = new TurnWriter(createSession(ctx), 1)
+    parent.start().prompt('delegate').header()
+    const step = parent.openStep()
+    parent.assistant(step, [{ type: 'tool-call', id: call('p1'), name: 'subagent', arguments: '{}' }])
+    const seq = parent.toolCall(step, 'p1', 'subagent', { prompt: 'summarize the notes file' })
+    const child = new TurnWriter(createSession(ctx, parent.session.id), 1)
+    child.start()
+    // A span before the delegated instruction has arrived: the binding must be
+    // settled here, with no prompt to go on.
+    child.session.append('compaction/end', { compactionId: 'c1' as never, turn: 1 })
+    child.prompt('summarize the notes file').header()
+    const childStep = child.openStep()
+    child.assistant(childStep, [{ type: 'text', text: 'the notes cover the release plan' }],
+      { inputTokens: 30, outputTokens: 5 })
+    child.closeStep(childStep).end()
+    parent.toolResult(step, 'p1', seq, 'the notes cover the release plan').closeStep(step).end()
+
+    const root = spans[spans.length - 1]!
+    expect(attribute(root, 'langfuse.observation.type')).toBe('agent')
+    expect(new Set(spans.map(span => span.traceId))).toEqual(new Set([root.traceId]))
+    const container = spans.find(span => span.name === 'subagent')!
+    const compaction = spans.find(span => span.name === 'context compaction')!
+    expect(compaction.parentSpanId).toBe(container.spanId)
+  })
+
+  it('leaves a child alone rather than filing it under an unrelated tool', async () => {
+    // A background delegation reports its result before its child starts, so a
+    // child arriving later finds no delegation in flight. Attaching it to
+    // whatever else the parent happens to be running would put a whole agent
+    // run — and its tokens — under a bash call.
+    const { ctx, spans } = await observe()
+    const parent = new TurnWriter(createSession(ctx), 1)
+    parent.start().prompt('start it in the background').header()
+    const step = parent.openStep()
+    parent.assistant(step, [
+      { type: 'tool-call', id: call('bg'), name: 'subagent', arguments: '{"run_in_background":true}' },
+      { type: 'tool-call', id: call('bash-1'), name: 'bash', arguments: '{"command":"sleep 5"}' },
+    ])
+    const bgSeq = parent.toolCall(step, 'bg', 'subagent', { prompt: 'audit the deps', run_in_background: true })
+    parent.toolResult(step, 'bg', bgSeq, 'started background subagent task job-1')
+    const bashSeq = parent.toolCall(step, 'bash-1', 'bash', { command: 'sleep 5' })
+    runChild(ctx, parent.session.id, 'the deps are current')
+    parent.toolResult(step, 'bash-1', bashSeq, 'slept').closeStep(step).end()
+
+    const bash = spans.find(span => span.name.startsWith('tool: bash'))!
+    expect(bash.name).toBe('tool: bash (sleep) #3')
+    expect(metadataOf(bash)['agent_subagent_count']).toBeUndefined()
+    const roots = spans.filter(span => attribute(span, 'langfuse.observation.type') === 'agent')
+    expect(roots.map(span => span.name)).toEqual(['DeepSeek Harness — Turn 1', 'DeepSeek Harness — Turn 1'])
+    expect(roots[0]!.traceId).not.toBe(roots[1]!.traceId)
+  })
+
+  it('keeps an ordinary fork out of its parent trace', async () => {
+    // `parentSession` records seed lineage too, so it cannot by itself mean
+    // "delegated run"; only the harness's own subagent classification can.
+    const { ctx, spans } = await observe()
+    const parent = new TurnWriter(createSession(ctx), 1)
+    parent.start().prompt('delegate').header()
+    const step = parent.openStep()
+    parent.assistant(step, [{ type: 'tool-call', id: call('p1'), name: 'subagent', arguments: '{}' }])
+    parent.toolCall(step, 'p1', 'subagent', { description: 'summarize' })
+    const fork = new TurnWriter(ctx.sessions.create(undefined, {
+      meta: { cwd: '/workspace', parentSession: parent.session.id },
+    }), 1)
+    fork.start().prompt('unrelated work').header()
+    const forkStep = fork.openStep()
+    fork.assistant(forkStep, [{ type: 'text', text: 'done' }])
+    fork.closeStep(forkStep).end()
+
+    expect(spans.filter(span => span.name === 'subagent')).toEqual([])
+    const root = spans.find(span => attribute(span, 'langfuse.observation.type') === 'agent')!
+    expect(root.parentSpanId).toBeUndefined()
+  })
+
   it('gives an unbound child session its own trace', async () => {
     const { ctx, spans } = await observe()
     const parent = createSession(ctx)

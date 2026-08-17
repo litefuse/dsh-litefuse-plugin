@@ -20,6 +20,7 @@
 import type { Message, TokenUsage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-compaction'
+import type {} from '@deepseek-ai/dsh-subagent'
 import {
   assistantOutput,
   reasoningChars,
@@ -79,13 +80,36 @@ interface ToolState {
 }
 
 /**
+ * Where a scope's spans go: a trace of its own, or a subagent container inside
+ * the delegating call's trace.
+ *
+ * A binding is decided once and never revised. A span carries its trace and its
+ * parent at the moment it is written and OTel spans are immutable, so a binding
+ * that could still change would be one that had already lied.
+ */
+type Binding =
+  | { readonly kind: 'turn'; readonly traceId: string }
+  | {
+    readonly kind: 'container'
+    readonly traceId: string
+    /** Delegation tool span this container mounts under. */
+    readonly toolSpanId: string
+  }
+
+/**
  * One numbering and parenting scope: a turn's root `agent` span, or a
  * subagent container mounted under a delegation tool span. Both own a step
  * counter, an input, and the observations still open inside them.
  */
 interface Scope {
-  kind: 'turn' | 'container'
-  traceId: string
+  /**
+   * Which trace this scope joins, resolved the first time anything asks and
+   * fixed from then on; `undefined` until then. Deliberately NOT decided at
+   * `turn/start`: for a delegated run, what identifies its delegating call is
+   * the prompt, which the harness delivers a moment later — and nothing reads a
+   * binding before then. See {@link TraceAssembler.resolveBinding}.
+   */
+  binding: Binding | undefined
   /** This scope's own span id — the parent of every observation inside it. */
   spanId: string
   startMillis: number
@@ -102,12 +126,6 @@ interface Scope {
   inputTruncatedFrom: number | undefined
   /** Whether {@link input} came from a direct human prompt rather than injected context. */
   inputFromUser: boolean
-  /**
-   * Whether any span of this scope has been written. A scope that has written
-   * nothing may still be re-homed onto another parent, because no observation
-   * references its trace id yet; see {@link TraceAssembler.rebindByPrompt}.
-   */
-  emitted: boolean
   /** Final assistant text, i.e. the trace or container output. */
   output: string
   /** Open generations by loop step number. */
@@ -120,8 +138,6 @@ interface Scope {
   pendingInput: Message[]
   /** Running token totals for this scope and every container beneath it. */
   usage: ScopeUsage
-  /** Delegation tool span this container mounts under; absent on a turn scope. */
-  toolSpanId?: string
 }
 
 /**
@@ -152,6 +168,29 @@ interface SessionState {
    * also set by an ordinary fork, whose events belong to no delegation call.
    */
   delegated: boolean
+  /**
+   * The delegating call's `description`, taken from this run's
+   * `subagent/descriptor`. The earliest identifying evidence there is — the
+   * descriptor is written before the run's first request, and for a spawned
+   * child it is already in the constructor seed.
+   */
+  delegationLabel: string | undefined
+  /**
+   * The delegating call's `prompt`, taken from this run's first human message.
+   * Later than the label but equally exact, and present for providers that
+   * record no descriptor.
+   */
+  delegationPrompt: string | undefined
+  /**
+   * Whether the delegating call returns only when this run is finished.
+   *
+   * A one-shot delegation resolves with the child's answer, so the parent's
+   * `tool/result` is the run's end. A `continuable` one resolves the moment the
+   * child is accepted — milliseconds in, with the whole run still ahead of it —
+   * so treating that result as the end would close the container over an agent
+   * that has not started working yet, and discard everything it goes on to do.
+   */
+  delegationAwaited: boolean
   cwd: string | undefined
   provider: string | undefined
   model: string | undefined
@@ -239,6 +278,15 @@ export class TraceAssembler {
       case 'compaction/end':
         this.onCompaction(state, event.data.error, event.time)
         return
+      case 'subagent/descriptor':
+        // A provider that appends the descriptor live rather than seeding it.
+        // It lands before the run's first request, so the label is available
+        // in time either way.
+        state.delegated = true
+        state.delegationLabel = event.data.label
+        state.delegationAwaited = event.data.mode !== 'continuable'
+        if (state.scope !== undefined) this.settleBinding(state, state.scope, false)
+        return
       default:
         // Merge-extensible vocabulary: an event type this integration does not
         // model — including one added by a plugin it never heard of — carries
@@ -259,8 +307,8 @@ export class TraceAssembler {
     if (state === undefined) return
     this.sessions.delete(sessionId)
     if (state.scope === undefined) return
-    if (state.scope.kind === 'container') {
-      // A delegated run is disposed BEFORE its parent records the delegation's
+    if (this.bindingOf(state, state.scope).kind === 'container' && state.delegationAwaited) {
+      // An awaited run is disposed BEFORE its parent records the delegation's
       // `tool/result`, so leaving the store is how a SUCCESSFUL child ends.
       // The parent owns this container and closes it with the child's own
       // outcome; closing it here would report every delegation as interrupted.
@@ -282,10 +330,18 @@ export class TraceAssembler {
     const id = String(session.id)
     const existing = this.sessions.get(id)
     if (existing !== undefined) return existing
+    const seeded = seededDescriptor(session)
     const state: SessionState = {
       id,
       parentSessionId: session.header.parentSession === undefined ? undefined : String(session.header.parentSession),
       delegated: session.header.origin === 'subagent',
+      // A spawned child carries its descriptor in the constructor seed, and a
+      // seed never reaches the `session/event` firehose, so the log is read
+      // directly here. A provider that appends the descriptor live instead is
+      // picked up by `record`.
+      delegationLabel: seeded?.label,
+      delegationPrompt: undefined,
+      delegationAwaited: seeded?.mode !== 'continuable',
       cwd: session.header.cwd,
       provider: undefined,
       model: undefined,
@@ -305,120 +361,163 @@ export class TraceAssembler {
    * not to one turn — and only records the newer turn number.
    */
   private onTurnStart(state: SessionState, turn: number, timeMillis: number): void {
-    if (state.scope?.kind === 'container') {
-      state.scope.turn = turn
-      state.scope.endMillis = timeMillis
-      return
-    }
     if (state.scope !== undefined) {
+      if (this.bindingOf(state, state.scope).kind === 'container') {
+        state.scope.turn = turn
+        state.scope.endMillis = timeMillis
+        return
+      }
       // Defensive: a turn opened without its predecessor closing means the
       // previous turn/end never reached this process.
       this.closeScope(state, state.scope, timeMillis, 'WARNING', 'turn superseded before it ended')
     }
-    state.scope = this.bindContainer(state, turn, timeMillis) ?? {
-      kind: 'turn',
-      traceId: newTraceId(),
+    state.scope = {
+      // Left unresolved on purpose — see {@link Scope.binding}.
+      binding: undefined,
       spanId: newSpanId(),
       startMillis: timeMillis,
       endMillis: timeMillis,
       turn,
-      ...blankScope(),
+      stepIndex: 0,
+      apiCalls: 0,
+      toolCalls: 0,
+      input: '',
+      inputTruncatedFrom: undefined,
+      inputFromUser: false,
+      output: '',
+      generations: new Map(),
+      planSteps: new Map(),
+      tools: new Map(),
+      pendingInput: [],
+      usage: emptyUsage(),
     }
+    // A `continuable` delegation reports its result within milliseconds of
+    // starting this run, so its call may already be gone by the time the run's
+    // own prompt is recorded. The descriptor label is in hand here.
+    this.settleBinding(state, state.scope, false)
   }
 
   /**
-   * Mount a subagent session's run under one of the parent's in-flight
-   * delegation calls, joining the parent's trace.
+   * This scope's binding, forcing a decision if one has not been reached.
    *
-   * The choice made here is provisional. Nothing in the child's identity names
-   * the call that spawned it, so the most recently started delegation is the
-   * best guess available at `turn/start` — and a wrong guess is corrected as
-   * soon as the child's own prompt arrives ({@link rebindByPrompt}).
+   * Every read of a trace id, and every decision that turns on container-ness,
+   * comes through here, so a scope is always bound before its first span is
+   * written and never rebound after.
+   * @param state - the session owning the scope.
+   * @param scope - the scope to bind.
+   * @returns the settled binding.
+   */
+  private bindingOf(state: SessionState, scope: Scope): Binding {
+    return scope.binding ?? this.settleBinding(state, scope, true)
+  }
+
+  /**
+   * Bind a scope as soon as the evidence determines which call it serves —
+   * and, when `final`, whether or not it does.
+   *
+   * A delegated run mounts as a container under the call that asked for it, in
+   * that call's trace. The harness gives the child no reference to that call:
+   * its session id is a fresh UUID and its header names only the parent
+   * session. What it does give, verbatim, is the delegation's `description`
+   * (through this run's `subagent/descriptor`) and its `prompt` (as the run's
+   * first human message). Either is an exact key.
+   *
+   * Timing is why this is not simply deferred to the prompt. A `continuable`
+   * delegation reports its tool result within milliseconds of starting the
+   * child — sooner than the child's own prompt is recorded — so a decision
+   * postponed until then would find no candidate left and file the run as a
+   * separate trace. Settling at the earliest determined moment is what keeps a
+   * delegation nested without ever having to move a scope that has already
+   * written a span.
    *
    * Only a configured delegation tool may host a container. An ordinary call
-   * that happens to be in flight is NOT a fallback: a background delegation
-   * returns its result before its child ever starts, so accepting any call
-   * would file that child under whatever unrelated tool the parent was running
-   * at the time — and roll its tokens into that tool's scope. An unbound child
-   * getting its own trace is the honest outcome.
-   * @returns the container scope, or `undefined` when this session is not a bound child.
+   * that happens to be in flight is NOT a fallback: accepting any call would
+   * file a whole agent run — and its tokens — under whatever unrelated tool the
+   * parent was running at the time. Its own trace is the honest outcome for a
+   * run whose call cannot be identified.
+   * @param state - the session being bound.
+   * @param scope - the scope to bind.
+   * @param final - whether a decision must be reached now, because a span is about to be written.
+   * @returns the settled binding, or `undefined` when the evidence is not yet decisive.
    */
-  private bindContainer(state: SessionState, turn: number, timeMillis: number): Scope | undefined {
-    const parentScope = this.parentScopeOf(state)
-    if (parentScope === undefined) return undefined
-    let chosen: ToolState | undefined
-    for (const tool of this.delegationsOf(parentScope)) {
-      if (chosen === undefined || tool.startMillis >= chosen.startMillis) chosen = tool
+  private settleBinding(state: SessionState, scope: Scope, final: true): Binding
+  private settleBinding(state: SessionState, scope: Scope, final: boolean): Binding | undefined
+  private settleBinding(state: SessionState, scope: Scope, final: boolean): Binding | undefined {
+    if (scope.binding !== undefined) return scope.binding
+    const parent = state.delegated && state.parentSessionId !== undefined
+      ? this.sessions.get(state.parentSessionId)
+      : undefined
+    const parentScope = parent?.scope
+    const chosen = parent === undefined || parentScope === undefined
+      ? undefined
+      : this.delegationFor(parentScope, state, final)
+    if (chosen === undefined) {
+      if (!final) return undefined
+      return scope.binding = { kind: 'turn', traceId: newTraceId() }
     }
-    if (chosen === undefined) return undefined
     chosen.children.push(state)
-    return {
+    // The parent is necessarily bound already — it cannot have recorded a tool
+    // call without having closed the model call that requested it — so this
+    // reads a settled trace id rather than forcing an early decision on it.
+    return scope.binding = {
       kind: 'container',
-      traceId: parentScope.traceId,
-      spanId: newSpanId(),
+      /* v8 ignore next -- a scope holding a tool call has emitted that call's plan step */
+      traceId: this.bindingOf(parent!, parentScope!).traceId,
       toolSpanId: chosen.spanId,
-      startMillis: timeMillis,
-      endMillis: timeMillis,
-      turn,
-      ...blankScope(),
     }
   }
 
   /**
-   * Re-home a delegated session onto the call that actually asked for it.
-   *
-   * The harness hands a child no reference to its originating call — the child
-   * session id is a fresh UUID and its header names only the parent session —
-   * but the delegation tool passes its `prompt` argument through verbatim as
-   * the child's first user message. That equality is the one exact key
-   * available, and it is what keeps concurrent delegations from collapsing onto
-   * whichever call started last. Concurrency is the normal case here, not an
-   * edge one: the subagent tool's own prompt asks the model to start
-   * independent delegations together in a single assistant message.
-   *
-   * Only a scope that has written nothing may move. Its trace id and parent are
-   * still unobserved at that point, so re-homing it cannot orphan a span that
-   * was already sent.
+   * The still-open scope of the session that delegated this run, when there is
+   * one — where a container's token totals are rolled up.
    * @param state - the delegated session.
-   * @param scope - its current scope, container or not.
-   * @param prompt - the child's first human-sourced prompt, untruncated.
+   * @returns the delegating scope, or `undefined` once it has closed.
    */
-  private rebindByPrompt(state: SessionState, scope: Scope, prompt: string): void {
-    if (scope.emitted || scope.stepIndex > 0) return
-    const parentScope = this.parentScopeOf(state)
-    if (parentScope === undefined) return
-    const candidates = this.delegationsOf(parentScope)
-    // Two calls may carry the same prompt. They are told apart by how many
-    // OTHER children each already holds, so a second identical delegation
-    // lands on the second call rather than doubling up on the first.
-    const load = (tool: ToolState): number => tool.children.filter(child => child !== state).length
-    let chosen: ToolState | undefined
-    for (const tool of candidates) {
-      if (delegationPrompt(tool.args) !== prompt) continue
-      if (chosen === undefined
-        || load(tool) < load(chosen)
-        || (load(tool) === load(chosen) && tool.startMillis < chosen.startMillis)) chosen = tool
-    }
-    if (chosen === undefined || chosen.spanId === scope.toolSpanId) return
-    for (const tool of candidates) {
-      const at = tool.children.indexOf(state)
-      if (at >= 0) tool.children.splice(at, 1)
-    }
-    chosen.children.push(state)
-    scope.kind = 'container'
-    scope.traceId = parentScope.traceId
-    scope.toolSpanId = chosen.spanId
-  }
-
-  /** The scope of the session that spawned this delegated run, when both are live. */
-  private parentScopeOf(state: SessionState): Scope | undefined {
-    if (!state.delegated || state.parentSessionId === undefined) return undefined
+  private hostScopeOf(state: SessionState): Scope | undefined {
+    if (state.parentSessionId === undefined) return undefined
     return this.sessions.get(state.parentSessionId)?.scope
   }
 
-  /** The delegation calls in flight in one scope, in the order they started. */
-  private delegationsOf(scope: Scope): ToolState[] {
-    return [...scope.tools.values()].filter(tool => this.options.delegationTools.includes(tool.name))
+  /**
+   * The delegation call one run serves.
+   *
+   * Identity first: a call whose `description` matches the run's descriptor
+   * label, or whose `prompt` matches the run's first message, is the call —
+   * which is what keeps concurrent delegations apart, and concurrency is the
+   * normal case, since the subagent tool's own prompt asks the model to start
+   * independent delegations together in one assistant message. Two calls
+   * carrying the same key are separated by how many children each already
+   * holds.
+   *
+   * Without a key, a single candidate is still unambiguous. Beyond that the
+   * answer is genuinely unknown, so nothing is returned until `final` forces a
+   * decision, at which point the most recently started call is the best guess
+   * available — that is the call whose execution created the run.
+   * @param scope - the delegating scope, whose in-flight calls are the candidates.
+   * @param state - the run being placed, carrying whatever keys have arrived.
+   * @param final - whether to fall back to a guess rather than decline.
+   * @returns the call to mount under, or `undefined` when it is not determined.
+   */
+  private delegationFor(scope: Scope, state: SessionState, final: boolean): ToolState | undefined {
+    const candidates = [...scope.tools.values()].filter(tool => this.options.delegationTools.includes(tool.name))
+    for (const key of [state.delegationLabel, state.delegationPrompt]) {
+      if (key === undefined) continue
+      let matched: ToolState | undefined
+      for (const tool of candidates) {
+        if (delegationDescription(tool.args) !== key && delegationPrompt(tool.args) !== key) continue
+        if (matched === undefined
+          || tool.children.length < matched.children.length
+          || (tool.children.length === matched.children.length && tool.startMillis < matched.startMillis)) matched = tool
+      }
+      if (matched !== undefined) return matched
+    }
+    if (candidates.length === 1) return candidates[0]
+    if (!final) return undefined
+    let latest: ToolState | undefined
+    for (const tool of candidates) {
+      if (latest === undefined || tool.startMillis >= latest.startMillis) latest = tool
+    }
+    return latest
   }
 
   /**
@@ -433,9 +532,12 @@ export class TraceAssembler {
     this.stageInput(scope, session, event)
     const fromUser = event.data.source.kind === 'user'
     const text = visibleText(event.data.content)
-    // A delegated prompt arrives here and nowhere else, and it is what says
-    // which delegation call this session is serving.
-    if (fromUser && text.length > 0) this.rebindByPrompt(state, scope, text)
+    // The delegated instruction: a second exact key, and the only one for a
+    // provider that records no descriptor.
+    if (fromUser && text.length > 0 && state.delegationPrompt === undefined) {
+      state.delegationPrompt = text
+      this.settleBinding(state, scope, false)
+    }
     if (!fromUser && scope.input.length > 0) return
     if (text.length === 0) return
     // Budgeted at capture: this string is repeated across the turn's spans, so
@@ -482,18 +584,19 @@ export class TraceAssembler {
     const calls = toolCalls(content)
     const text = visibleText(content)
     const thinkingChars = reasoningChars(content)
+    const binding = this.bindingOf(state, scope)
     const name = generationObservationName(
       { toolCallCount: calls.length, hasText: text.length > 0, hasReasoning: thinkingChars > 0 },
       generation.stepIndex,
-      scope.kind === 'container',
+      binding.kind === 'container',
     )
     if (calls.length === 0 && text.length > 0) scope.output = text
     addUsage(scope.usage, usage)
     const input = this.requestInput(scope, session)
     const output = serializeValue(assistantOutput(content), this.options.maxValueChars)
     scope.pendingInput = []
-    this.emitIn(scope, {
-      traceId: scope.traceId,
+    this.emit({
+      traceId: binding.traceId,
       spanId: generation.spanId,
       parentSpanId: scope.spanId,
       name,
@@ -573,15 +676,17 @@ export class TraceAssembler {
     scope.tools.delete(callId)
     for (const child of tool.children) {
       const container = child.scope
-      if (container?.kind !== 'container') continue
+      // A `continuable` delegation resolves at acceptance, with the whole run
+      // still ahead of it; that run closes its own container when it ends.
+      if (container?.binding?.kind !== 'container' || !child.delegationAwaited) continue
       mergeUsage(scope.usage, container.usage)
       this.closeScope(child, container, container.endMillis, child.containerLevel, child.containerStatus)
     }
     const isError = block.isError === true
     const output = serializeValue(visibleText(block.content), this.options.maxValueChars)
     const input = serializeValue(tool.args, this.options.maxValueChars)
-    this.emitIn(scope, {
-      traceId: scope.traceId,
+    this.emit({
+      traceId: this.bindingOf(state, scope).traceId,
       spanId: tool.spanId,
       parentSpanId: scope.spanId,
       name: toolObservationName(tool.name, tool.args, tool.stepIndex, tool.children.length),
@@ -614,17 +719,28 @@ export class TraceAssembler {
     })
   }
 
-  /** Close a turn scope; a subagent container outlives its child's turns. */
+  /** Close a turn scope; an awaited subagent container outlives its child's turns. */
   private onTurnEnd(state: SessionState, reason: { kind: string }, timeMillis: number): void {
     const scope = state.scope
     if (scope === undefined) return
     scope.endMillis = timeMillis
-    if (scope.kind === 'container') {
-      // The container closes later, with its parent's tool result; remember the
-      // child's own verdict so a failed delegation is still reported as one.
+    if (this.bindingOf(state, scope).kind === 'container') {
       const [level, status] = outcomeOf(reason, scope.output)
-      state.containerLevel = level
-      state.containerStatus = status
+      if (state.delegationAwaited) {
+        // The container closes later, with its parent's tool result; remember
+        // the child's own verdict so a failed delegation is still reported as
+        // one.
+        state.containerLevel = level
+        state.containerStatus = status
+        return
+      }
+      // A `continuable` run's delegation call returned long ago, so nothing
+      // else will ever close this container. Its own turn ending is the end of
+      // the delegated work, and the tokens still belong to the turn that
+      // delegated it.
+      const host = this.hostScopeOf(state)
+      if (host !== undefined) mergeUsage(host.usage, scope.usage)
+      this.closeScope(state, scope, timeMillis, level, status, reason.kind)
       return
     }
     const failed = reason.kind === 'error'
@@ -642,8 +758,8 @@ export class TraceAssembler {
     const scope = state.scope
     if (scope === undefined) return
     scope.endMillis = timeMillis
-    this.emitIn(scope, {
-      traceId: scope.traceId,
+    this.emit({
+      traceId: this.bindingOf(state, scope).traceId,
       spanId: newSpanId(),
       parentSpanId: scope.spanId,
       name: 'context compaction',
@@ -673,11 +789,12 @@ export class TraceAssembler {
     endReason?: string,
   ): void {
     if (state.scope === scope) state.scope = undefined
+    const binding = this.bindingOf(state, scope)
     const closeAt = Math.max(endMillis, scope.endMillis)
     for (const [step, generation] of scope.generations) {
       scope.generations.delete(step)
-      this.emitIn(scope, {
-        traceId: scope.traceId,
+      this.emit({
+        traceId: binding.traceId,
         spanId: generation.spanId,
         parentSpanId: scope.spanId,
         name: `generation #${generation.stepIndex}`,
@@ -699,12 +816,12 @@ export class TraceAssembler {
       // close them here so no span references a parent that was never written.
       for (const child of tool.children) {
         const container = child.scope
-        if (container?.kind !== 'container') continue
+        if (container?.binding?.kind !== 'container') continue
         mergeUsage(scope.usage, container.usage)
         this.closeScope(child, container, closeAt, 'WARNING', 'delegation ended before the subagent returned')
       }
-      this.emitIn(scope, {
-        traceId: scope.traceId,
+      this.emit({
+        traceId: binding.traceId,
         spanId: tool.spanId,
         parentSpanId: scope.spanId,
         name: toolObservationName(tool.name, tool.args, tool.stepIndex, tool.children.length),
@@ -726,7 +843,7 @@ export class TraceAssembler {
         },
       })
     }
-    const isContainer = scope.kind === 'container'
+    const isContainer = binding.kind === 'container'
     const output = serializeValue(scope.output, this.options.maxValueChars)
     const summary: Record<string, unknown> = {
       turn_number: scope.turn,
@@ -759,10 +876,10 @@ export class TraceAssembler {
         ? undefined
         : scope.usage.input + scope.usage.output + scope.usage.cacheRead + scope.usage.cacheWrite,
     }
-    this.emitIn(scope, {
-      traceId: scope.traceId,
+    this.emit({
+      traceId: binding.traceId,
       spanId: scope.spanId,
-      ...isContainer && scope.toolSpanId !== undefined ? { parentSpanId: scope.toolSpanId } : {},
+      ...binding.kind === 'container' ? { parentSpanId: binding.toolSpanId } : {},
       name: isContainer ? 'subagent' : traceName(this.options.agentName, scope.turn),
       startTimeMillis: scope.startMillis,
       endTimeMillis: closeAt,
@@ -786,9 +903,14 @@ export class TraceAssembler {
    * outside a subagent container, the trace header. Repeating the header on
    * each span is what makes a trace queryable as soon as its first observation
    * completes, since the root span is not written until the turn ends.
+   *
+   * The trace input is the one header field with no fixed size, and repetition
+   * multiplies it by the turn's span count, so what rides here is a preview.
+   * The root `agent` span carries the input in full, up to the configured
+   * budget.
    */
   private commonAttributes(state: SessionState, scope: Scope): Attributes {
-    if (scope.kind === 'container') {
+    if (this.bindingOf(state, scope).kind === 'container') {
       return { 'langfuse.environment': this.options.environment }
     }
     const tags = [...this.options.tags]
@@ -796,7 +918,7 @@ export class TraceAssembler {
     return {
       'langfuse.environment': this.options.environment,
       'langfuse.trace.name': traceName(this.options.agentName, scope.turn),
-      'langfuse.trace.input': scope.input.length === 0 ? undefined : scope.input,
+      'langfuse.trace.input': tracePreview(scope.input),
       'langfuse.trace.tags': tags,
       'langfuse.release': this.options.release,
       'session.id': state.id,
@@ -837,6 +959,80 @@ export class TraceAssembler {
       }
     }
   }
+}
+
+/**
+ * Longest trace input repeated onto every span of a turn.
+ *
+ * The trace header rides on each span so the trace is queryable before its root
+ * is written, which means a one-megabyte prompt would otherwise be paid for
+ * once per observation. Every span carries the same preview, so whichever one
+ * the server folds into the trace record yields the same text.
+ */
+const TRACE_INPUT_PREVIEW_CHARS = 4_096
+
+/**
+ * Clip the trace input to what may be repeated across a turn's spans.
+ * @param input - the scope's input, already inside the configured budget.
+ * @returns the preview, or `undefined` when the scope has no input yet.
+ */
+function tracePreview(input: string): string | undefined {
+  if (input.length === 0) return undefined
+  return input.length <= TRACE_INPUT_PREVIEW_CHARS ? input : `${input.slice(0, TRACE_INPUT_PREVIEW_CHARS)}…`
+}
+
+/**
+ * The prompt a delegation call carried, when its arguments name one.
+ *
+ * The harness delivers this string verbatim as the child session's first user
+ * message, which is what makes it an identity for the run rather than merely a
+ * description of it.
+ * @param args - the delegation call's parsed arguments.
+ * @returns the prompt, or `undefined` when the call names none.
+ */
+function delegationPrompt(args: unknown): string | undefined {
+  return argumentString(args, 'prompt')
+}
+
+/**
+ * The short description a delegation call carried, which the harness keeps as
+ * the child's durable descriptor label.
+ * @param args - the delegation call's parsed arguments.
+ * @returns the description, or `undefined` when the call names none.
+ */
+function delegationDescription(args: unknown): string | undefined {
+  return argumentString(args, 'description')
+}
+
+/**
+ * Read one non-empty string out of a tool call's parsed arguments.
+ * @param args - the parsed arguments, which a malformed call may leave as text.
+ * @param field - the argument to read.
+ * @returns the value, or `undefined` when it is absent or not a non-empty string.
+ */
+function argumentString(args: unknown, field: string): string | undefined {
+  if (args === null || typeof args !== 'object' || Array.isArray(args)) return undefined
+  const value = (args as Record<string, unknown>)[field]
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+/**
+ * The subagent descriptor a spawned run carries in its constructor seed.
+ *
+ * A seed never reaches the `session/event` firehose, so a descriptor written
+ * there is invisible to {@link TraceAssembler.record} and has to be read off
+ * the log. The descriptor is written before the run's first request, so the
+ * scan stops at the first step rather than walking a resumed session's whole
+ * history.
+ * @param session - the session being adopted.
+ * @returns the descriptor, or `undefined` when the seed records none.
+ */
+function seededDescriptor(session: Session): { label?: string; mode: string } | undefined {
+  for (const event of session.events) {
+    if (event.type === 'step/start') return undefined
+    if (event.type === 'subagent/descriptor') return event.data
+  }
+  return undefined
 }
 
 /** Parse the model's raw argument JSON, keeping invalid JSON as its own text. */
@@ -939,8 +1135,13 @@ function metadata(namespace: string, fields: Record<string, unknown>): Attribute
   return attributes
 }
 
-/** Observation-level metadata namespace. */
-const OBSERVATION_METADATA = 'langfuse.observation.metadata'
+/**
+ * Observation-level metadata namespace. Exported because a reader of these
+ * fields has to address them the same way they are written: the whole map is
+ * spread per key beneath this prefix, and nothing is stored on the namespace
+ * itself.
+ */
+export const OBSERVATION_METADATA = 'langfuse.observation.metadata'
 
 /** Trace-level metadata namespace. */
 const TRACE_METADATA = 'langfuse.trace.metadata'

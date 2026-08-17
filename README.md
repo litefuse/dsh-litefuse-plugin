@@ -92,7 +92,8 @@ The plugin subscribes to `session/event`, the harness's post-commit append feed,
 | `tool/call` … `tool/result` | one `tool` span, linked to its plan through `agent_plan_step` |
 | `request/header`, `request/context` | the model name, sampling parameters, and context window |
 | `compaction/end` | a `context compaction` event, which explains the next call's token drop |
-| a child session whose parent has a delegation call in flight | a `subagent` container under that call's tool span |
+| `subagent/descriptor` | which delegation call a child run belongs to, and whether that call awaits it |
+| a child session matched to a delegation call | a `subagent` container under that call's tool span |
 
 Spans mount **flat** under their container; the only depth is a real subagent run. Generations and tools share one step counter, so `#N` is a single chronological sequence and `tool.agent_plan_step == generation.agent_step_index` joins a tool back to the call that requested it.
 
@@ -102,7 +103,13 @@ Each span is written **once, when it ends** — OTel spans are immutable, so an 
 
 A delegated run is its own session in the harness. When one starts while a delegation call is in flight in its parent, the child's steps mount under a `subagent` container parented to that call's tool span, numbering restarted at #1, its closing answer named `subagent response`, and its token usage rolled into the parent trace's total. The gap between the tool span and the container is the real cost of delegating.
 
-A child that starts with no delegation call in flight — a background or continuable subagent — gets its own trace instead, with `agent_parent_session_id` in the root metadata.
+**Which call a child belongs to is decided by identity, once.** The harness hands a child no reference to the call that spawned it — a fresh session id, and a header naming only the parent session. What it does hand over, verbatim, is the delegation's `description`, as the `label` of the child's own `subagent/descriptor`, and its `prompt`, as the child's first user message. Either is an exact key, and one of them is what keeps concurrent delegations apart — concurrency being the normal case, since the subagent tool's own prompt asks the model to start independent delegations together in one assistant message.
+
+A span carries its trace and its parent at the moment it is written and OTel spans are immutable, so a binding that could still change would be one that had already lied. The rule is therefore to bind at the earliest moment the answer is *determined* — an exact key match, or a single candidate call — and never to revise it. Waiting longer is not free: a `continuable` delegation reports its tool result within milliseconds of starting the child, before the child's own prompt is even recorded, so a decision deferred that far would find no candidate left. The descriptor is what makes the early decision an exact one rather than a guess, and for a spawned child it arrives in the constructor seed, which the `session/event` firehose never republishes — so it is read from the session log directly.
+
+**A delegation call returning is not always the run ending.** A one-shot delegation resolves with the child's answer, so the parent's `tool/result` closes the container. A `continuable` one resolves at acceptance, with the entire run still ahead of it; closing there would seal an empty container and drop everything the child then did. Those containers close on the child's own `turn/end` instead, rolling their tokens into the turn that delegated them.
+
+Only a tool named in `delegationTools` can host a container. An ordinary call that happens to be in flight is deliberately *not* a fallback: a background delegation reports its result before its child ever starts, so accepting any call would file a whole agent run — and its tokens — under whatever unrelated tool the parent was running at the time. A child that finds no delegation in flight gets its own trace instead, with `agent_parent_session_id` in the root metadata. A session that merely names a `parentSession` is not enough either; the harness's own `origin: subagent` classification is what admits a session into its parent's trace, so an ordinary fork stays outside it.
 
 ### Metadata
 
@@ -115,8 +122,6 @@ All metadata is flat under one `agent_` prefix — never a per-agent namespace �
 Metadata rides as **per-key span attributes** (`langfuse.observation.metadata.agent_step_index`), not as one serialized blob. A JSON string would be stored verbatim beside its parsed copy, leaving JSON nested inside a string in the raw attribute set, and the trace spec forbids pre-serialized JSON as a metadata value because flattening it server-side corrupts the escaping.
 
 Token counts use the keys Litefuse prices and classifies from: `input`, `output`, `output_reasoning_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`. Prompt counts arrive disjoint from the harness, so they sum to billed input unchanged. Completion is the opposite — the harness folds reasoning into `outputTokens` — so reasoning is subtracted back out of `output` and reported as its sibling. Litefuse sums every key containing `output` into the displayed Output figure, and its own ingestion processor normalizes provider payloads exactly this way, so the split keeps both the breakdown and the cost right. A model definition should price `output_reasoning_tokens` alongside `output`; the shipped price table already does for every reasoning model it knows.
-
-**Reasoning tokens ride as `reasoning`, plus an explicit `total`.** Litefuse sums every usage key containing `input` into the input figure, every key containing `output` into the output figure, and — unless you supply `total` — every key into the billed total. A provider already counts reasoning inside its completion tokens, so the ecosystem's `output_reasoning` spelling would bill them twice. Naming the key `reasoning` puts it in the breakdown's *Other* section, and supplying `total` keeps the billed figure equal to input + output + cache. The result matches what the harness's own Trajectory view shows: `1028 output = 677 reasoning + 351 content`.
 
 **The token rollup is metadata only.** An `agent` span — turn root or subagent container — carries the totals for itself and everything nested beneath it as `agent_*_tokens`, but never as `usage_details`. Litefuse prices a trace by summing its spans, so a container that also declared its children's tokens would double the bill. Read `agent_total_tokens` on the root for "how big was this turn"; read `totalCost` for what it cost.
 
@@ -146,7 +151,7 @@ An id-targeted patch replaces the whole `config`, so restate the fields you keep
 | `tags` | `[dsh]` | trace tags, beside the generated `model:<name>` |
 | `release` | — | optional release identifier on every trace |
 | `requestInput` | `full` | `full` sends the whole request; `delta` only the messages added since the last call; `none` omits inputs |
-| `maxValueChars` | `1000000` | truncation budget per input/output |
+| `maxValueChars` | `1000000` | truncation budget per input/output, the trace input included |
 | `delegationTools` | `[subagent, subagent_fork]` | tool names whose in-flight call hosts a subagent container |
 | `exportDelayMillis` | `1000` | how long an ended span waits for company before its batch posts |
 | `requestTimeoutMillis` | `10000` | per-request deadline |
@@ -160,7 +165,9 @@ Credentials are **references, not values**: configuration names an environment v
 
 **Fail-open, always.** Every handler is self-contained and every failure is logged and swallowed. Session dispatch stops on a throwing listener, so an exception escaping this plugin would starve every observer registered after it. An unreachable Litefuse project costs one request deadline and nothing else.
 
-**Zero runtime dependencies.** The built plugin imports nothing but `node:module` and its own files — every harness and Cordis import is type-only. This is deliberate: a plugin installed into a profile that pulled in its own copy of `@deepseek-ai/cordis` would give the host two distinct `Context` classes, and service wiring would fail in ways that are very hard to diagnose.
+**Zero runtime dependencies.** The built plugin imports nothing outside `node:` and its own files — every harness and Cordis import is type-only, and CI gates the property. This is deliberate: a plugin installed into a profile that pulled in its own copy of `@deepseek-ai/cordis` would give the host two distinct `Context` classes, and service wiring would fail in ways that are very hard to diagnose.
+
+**The trace header is repeated, so it stays small.** Every span carries the trace's name, tags, session, and user so the trace is queryable before its root is written. The input is the one header field with no natural size, and repeating it would charge a pasted file once per span, so what rides along is a 4096-character preview — the same text on every span, so whichever one the server folds into the trace record reads alike. The root `agent` span carries the input in full, up to `maxValueChars`.
 
 **It writes its own log.** A booted dsh profile composes no logger plugin, so `ctx.logger` output is invisible. The file at `$DSH_HOME/litefuse.log` is where this integration reports, matching what Litefuse's other integrations do.
 
@@ -168,7 +175,8 @@ Credentials are **references, not values**: configuration names an environment v
 
 ## Known limitations
 
-- **Parallel delegations from separate calls can mis-bind.** A child session binds to the parent's most recently started in-flight delegation call. When two delegation calls run concurrently in one step, a child can attach to the wrong one. Ordinary tools running beside a delegation are not affected — the configured `delegationTools` names are preferred.
+- **A delegation that shares neither a descriptor nor its prompt can mis-bind.** Concurrent calls are told apart by the child's descriptor `label` or by the `prompt` it was handed verbatim. A provider that records no descriptor *and* rewrites the prompt, or a delegation tool naming those arguments differently, falls back to the most recently started call — and with several in flight, a child can then attach to the wrong one.
+- **A background one-shot delegation is not nested.** Its call reports a job id and closes, and the child may be created after that, with no candidate call left in flight; the run gets its own trace, with `agent_parent_session_id` in the root metadata. `continuable` delegations do nest, because their child exists before the call reports.
 - **Out-of-process subagents get their own traces.** Providers that run a child in another process (`acp`, `codex`, the SDK providers) publish no session events into this process, so their runs are not subtrees. In-process providers — which the shipped `subagent` and `subagent_fork` tools use — are.
 - **Parallel tool spans can overstate duration.** The harness commits tool results in model order, so a fast call that finishes behind a slow sibling records its result timestamp, not its own completion.
 - **`requestInput: full` folds the derived history per model call.** That is one pass over the session log per call — negligible beside a model round trip, but `delta` exists for very long sessions.
@@ -196,7 +204,7 @@ OIDC and needs no token at all.
 
 ```bash
 npm install
-npm test        # 32 tests over the real @deepseek-ai/dsh-session Session
+npm test        # 46 tests over the real @deepseek-ai/dsh-session Session
 npm run typecheck
 npm run build
 ```

@@ -250,7 +250,12 @@ describe('plugin composition', () => {
 
     const written = readFileSync(logFile, 'utf8')
     expect(written).toMatch(/exporting to http:\/\/127\.0\.0\.1/)
-    expect(written).toMatch(/turn closed "DeepSeek Harness — Turn 1" trace=[0-9a-f]{32}/)
+    // Pinned whole, not by prefix: every field after `trace=` is read back out
+    // of the root span's metadata, and reading it the wrong way degrades to a
+    // line of `undefined`s that a prefix match still accepts.
+    expect(written).toMatch(
+      /turn closed "DeepSeek Harness — Turn 1" trace=[0-9a-f]{32} session=\S+ steps=1 api=1 tools=0 duration=\d+ms/,
+    )
     expect(written).toMatch(/sent \d+ span\(s\)/)
     // The public key is identified by prefix only, and the secret never appears.
     expect(written).not.toContain(TEST_SECRET_KEY)

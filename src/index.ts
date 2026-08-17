@@ -22,7 +22,7 @@ import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-session'
 import { createLog, harnessHome, type LitefuseLog } from './log.js'
 import { LitefuseSpanExporter, type LitefuseSpan } from './otlp.js'
-import { TraceAssembler, type RequestInputScope } from './trace.js'
+import { OBSERVATION_METADATA, TraceAssembler, type RequestInputScope } from './trace.js'
 
 const { version } = createRequire(import.meta.url)('../package.json') as { version: string }
 
@@ -323,20 +323,21 @@ async function announce(
 /**
  * Render one finished trace as a verification line: what the smoke test in the
  * README tells the operator to look for.
+ *
+ * Metadata is addressed per key beneath its namespace, which is the only form
+ * the assembler writes — the namespace attribute itself is deliberately never
+ * set, so reading it would report every field as absent.
  * @param root - the turn's root span, taken as it leaves the assembler.
  * @returns the log line describing that turn.
  */
 function turnSummary(root: LitefuseSpan): string {
-  const raw = root.attributes['langfuse.observation.metadata']
-  const fields: Record<string, unknown> = typeof raw === 'string'
-    ? JSON.parse(raw) as Record<string, unknown>
-    : {}
+  const field = (name: string): string => String(root.attributes[`${OBSERVATION_METADATA}.agent_${name}`])
   return `turn closed "${root.name}" trace=${root.traceId}`
-    + ` session=${String(fields['agent_session_id'])}`
-    + ` steps=${String(fields['agent_steps'])}`
-    + ` api=${String(fields['agent_api_calls'])}`
-    + ` tools=${String(fields['agent_tool_calls'])}`
-    + ` duration=${String(fields['agent_duration_ms'])}ms`
+    + ` session=${field('session_id')}`
+    + ` steps=${field('steps')}`
+    + ` api=${field('api_calls')}`
+    + ` tools=${field('tool_calls')}`
+    + ` duration=${field('duration_ms')}ms`
 }
 
 /**
