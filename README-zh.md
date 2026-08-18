@@ -175,7 +175,7 @@ tail -5 ~/.dsh/litefuse.log
 
 **trace 头信息会重复发送，所以必须保持小。** 每个 span 都带上 trace 的名字、标签、session 和 user，这样 trace 在根节点写出之前就可查询。输入是这组头信息里唯一没有天然大小上限的字段，重复发送等于把一次粘贴的大文件按 span 数量计费一遍，所以随行的是一段 **4096 字符的预览** —— 每个 span 上的这段文本完全相同，因此服务端无论折叠哪一个进 trace 记录，读到的都一样。根 `agent` span 则携带完整输入，上限为 `maxValueChars`。
 
-**它把自己声明为 SDK scope。** 批次以 instrumentation scope `langfuse-sdk-dsh-litefuse-plugin` 的身份到达。这个前缀是在告诉摄取端"这些 span 发出即完整"；没有它，服务端会假定这是一个可能压根没填 Langfuse 属性的通用 OTel exporter，于是把整份原始属性表复制进每个 observation 的 metadata（字段名 `attributes`）。这份拷贝在这里是纯冗余 —— 里面每个属性都已经是一等字段 —— 而且不可读，因为它会把 `model.parameters` 和 `usage_details` 按规范必须是 JSON 字符串的那些值再编码一层。这与 `x-langfuse-ingestion-version: 4` 在协议层表达的是同一个主张。
+**scope 写的是本包，不是某个 SDK。** 批次以 instrumentation scope `dsh-litefuse-plugin` 的身份到达。摄取端会把 span 的整份原始属性表复制进每个 observation 的 metadata（字段名 `attributes`），除非 scope 名以 `langfuse-sdk` 开头；顶着那个前缀确实能抑制这份拷贝，曾有一个版本这么做过，但 scope 是身份字段，而本插件并不是 Langfuse SDK。这份拷贝的代价是噪音而非正确性 —— 里面每个属性都已经是一等字段，没有任何数据丢失或出错，只是被重复了一遍，而且形式上把 `model.parameters` 和 `usage_details` 按规范必须是 JSON 字符串的那些值又编码了一层。准确的修法在摄取端：它本来就收到了本 exporter 发出的 `x-langfuse-ingestion-version: 4` —— 那才是「客户端发出即完整 span」的文档化信号，而且它对任何做出该声明的自定义 exporter 都成立，不像名字前缀那样只认一个。
 
 **它写自己的日志。** 启动后的 dsh profile 不会组合任何 logger 插件，所以 `ctx.logger` 的输出是看不见的。`$DSH_HOME/litefuse.log` 才是这个集成汇报的地方，这也与 Litefuse 其他集成的做法一致。
 

@@ -30,20 +30,24 @@ const { version } = createRequire(import.meta.url)('../package.json') as { versi
 export const name = 'dsh-litefuse-plugin'
 
 /**
- * Instrumentation scope reported with every batch.
+ * Instrumentation scope reported with every batch: this package, named
+ * accurately.
  *
- * The `langfuse-sdk` prefix is load-bearing rather than decorative. A batch
- * whose scope does not name an SDK is assumed to come from a generic OTel
- * exporter that may not have populated the Langfuse attributes at all, so the
- * ingest copies the span's whole raw attribute map into observation metadata as
- * a fallback. For this exporter that copy is pure redundancy — every attribute
- * in it is already a first-class field — and it is unreadable besides: the
- * values re-encoded into it include the JSON strings that `model.parameters`
- * and `usage_details` are required to be, which come back double-encoded.
- * Declaring the prefix states what `x-langfuse-ingestion-version` already
- * states on the wire: these spans are complete as sent.
+ * The ingest copies a span's whole raw attribute map into each observation's
+ * metadata as `attributes` unless the scope name begins with `langfuse-sdk`.
+ * Claiming that prefix suppresses the copy — one release did — but the scope is
+ * an identity field and this is not a Langfuse SDK, so the claim bought a
+ * cleaner payload by misreporting who sent it.
+ *
+ * The copy costs nothing but noise: every attribute in it is already a
+ * first-class field, so no data is lost or wrong, only duplicated in a form
+ * that re-encodes the JSON strings `model.parameters` and `usage_details` are
+ * required to be. The accurate fix belongs on the ingest side, which already
+ * receives `x-langfuse-ingestion-version: 4` from this exporter — the
+ * documented signal that a client sends complete spans inline, and a claim that
+ * is true of any custom exporter making it rather than of one name prefix.
  */
-const SCOPE_NAME = `langfuse-sdk-${name}`
+const SCOPE_NAME = name
 
 /** The session store must exist before this plugin has anything to observe. */
 export const inject = ['sessions']

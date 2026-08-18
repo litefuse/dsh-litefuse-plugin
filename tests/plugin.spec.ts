@@ -206,11 +206,11 @@ describe('plugin composition', () => {
     // The observer's version belongs to the instrumentation scope instead.
     expect(payload.resourceSpans[0]!.scopeSpans[0]!.scope.version)
       .toBe(createRequire(import.meta.url)('../package.json').version)
-    // The `langfuse-sdk` prefix is what tells the ingest these spans arrive
-    // complete, so it does not fall back to copying the raw attribute map into
-    // observation metadata. Renaming the scope without that prefix puts an
-    // unreadable duplicate of every attribute back on every observation.
-    expect(payload.resourceSpans[0]!.scopeSpans[0]!.scope.name).toBe('langfuse-sdk-dsh-litefuse-plugin')
+    // The scope names this package. It deliberately does not claim the
+    // `langfuse-sdk` prefix that suppresses the ingest's raw-attribute copy:
+    // the scope identifies who sent the spans, and this is not that SDK.
+    expect(payload.resourceSpans[0]!.scopeSpans[0]!.scope.name).toBe('dsh-litefuse-plugin')
+    expect(payload.resourceSpans[0]!.scopeSpans[0]!.scope.name).not.toMatch(/^langfuse-sdk/)
   })
 
   it('writes each span exactly once', async () => {
