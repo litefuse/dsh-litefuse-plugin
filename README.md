@@ -1,5 +1,7 @@
 # dsh-litefuse-plugin
 
+English | [中文](README-zh.md)
+
 DeepSeek Harness [Litefuse](https://litefuse.ai) Plugin for Agent Observability and Evals.
 
 Every user turn becomes one trace: an `agent` root, one `generation` per model call with real latency and token usage, one `tool` per tool execution, and a nested container for every subagent the turn delegated to. It implements the [Litefuse agent-trace spec v1.2](https://litefuse.ai/litefuse-agent-trace-spec.md).
@@ -201,10 +203,17 @@ The workflow refuses a tag that disagrees with `package.json`, and `prepack`
 builds before packing, so the tarball always carries `lib/` and installers never
 compile anything.
 
-First release only: publish once by hand (`npm publish --access public`) to
-create the package, then either add an `NPM_TOKEN` repository secret or
-configure npm Trusted Publishing for this workflow, which authenticates over
-OIDC and needs no token at all.
+The workflow authenticates through npm Trusted Publishing: it presents the
+GitHub OIDC identity for this repository and workflow, and npm exchanges it for
+a short-lived credential. No token is stored anywhere, nothing needs rotating,
+and the account's 2FA is never bypassed — provenance is attached automatically
+rather than by flag.
+
+Trusted Publishing is configured on a package that already exists, so the very
+first release of a new name is the one publish that cannot use it: create the
+package once by hand (`npm publish --access public`, answering the account's
+2FA prompt), then configure the publisher and every later release runs
+tokenless.
 
 ## Development
 
