@@ -1,5 +1,5 @@
 {
-  "name": "dsh-litefuse",
+  "name": "dsh-litefuse-plugin",
   "version": "0.1.0",
   "description": "Litefuse observability for DeepSeek Harness: every user turn becomes one agent trace with per-call generations, tool spans, and subagent subtrees",
   "type": "module",
@@ -47,11 +47,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/xiaokang/dsh-litefuse.git"
+    "url": "git+https://github.com/litefuse/dsh-litefuse-plugin.git"
   },
-  "homepage": "https://github.com/xiaokang/dsh-litefuse#readme",
+  "homepage": "https://github.com/litefuse/dsh-litefuse-plugin#readme",
   "bugs": {
-    "url": "https://github.com/xiaokang/dsh-litefuse/issues"
+    "url": "https://github.com/litefuse/dsh-litefuse-plugin/issues"
   },
   "keywords": [
     "litefuse",

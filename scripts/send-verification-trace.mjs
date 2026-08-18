@@ -11,7 +11,7 @@
  *
  * Reads LITEFUSE_PUBLIC_KEY / LITEFUSE_SECRET_KEY / LITEFUSE_BASE_URL from the
  * environment. The trace is tagged `environment: development` and named
- * `dsh-litefuse-verify — Turn 1` so it cannot be mistaken for real agent
+ * `dsh-litefuse-plugin-verify — Turn 1` so it cannot be mistaken for real agent
  * traffic in a dashboard.
  */
 
@@ -40,12 +40,12 @@ const exporter = new LitefuseSpanExporter({
   onSuccess: message => console.log('ok  ', message),
 }, {
   resource: { 'service.name': 'deepseek-harness', 'service.version': 'verify' },
-  scopeName: 'dsh-litefuse',
+  scopeName: 'langfuse-sdk-dsh-litefuse-plugin',
   scopeVersion: 'verify',
 })
 
 const assembler = new TraceAssembler({
-  agentName: 'dsh-litefuse-verify',
+  agentName: 'dsh-litefuse-plugin-verify',
   environment: 'development',
   userId: 'verification',
   tags: ['dsh', 'verification'],

@@ -12,7 +12,7 @@
  * public and secret key come from the harness credential store when one is
  * mounted, otherwise from the process environment that `~/.dsh/.env` feeds.
  *
- * @module dsh-litefuse
+ * @module dsh-litefuse-plugin
  */
 
 import { createRequire } from 'node:module'
@@ -27,7 +27,7 @@ import { OBSERVATION_METADATA, TraceAssembler, type RequestInputScope } from './
 const { version } = createRequire(import.meta.url)('../package.json') as { version: string }
 
 /** Cordis plugin name. */
-export const name = 'dsh-litefuse'
+export const name = 'dsh-litefuse-plugin'
 
 /**
  * Instrumentation scope reported with every batch.
@@ -134,7 +134,7 @@ export interface Config {
  */
 function positive(label: string, value: number): number {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
-    throw new Error(`dsh-litefuse: ${label} must be a positive finite number, got ${String(value)}`)
+    throw new Error(`dsh-litefuse-plugin: ${label} must be a positive finite number, got ${String(value)}`)
   }
   return value
 }
@@ -149,7 +149,7 @@ function positive(label: string, value: number): number {
 function text(label: string, value: string | undefined, fallback: string): string {
   if (value === undefined) return fallback
   if (typeof value !== 'string' || value.length === 0) {
-    throw new Error(`dsh-litefuse: ${label} must be a non-empty string, got ${JSON.stringify(value)}`)
+    throw new Error(`dsh-litefuse-plugin: ${label} must be a non-empty string, got ${JSON.stringify(value)}`)
   }
   return value
 }
@@ -168,7 +168,7 @@ function requestInputScope(value: RequestInputScope | undefined): RequestInputSc
     case 'none':
       return value
     default:
-      throw new Error(`dsh-litefuse: requestInput must be full, delta, or none, got ${JSON.stringify(value)}`)
+      throw new Error(`dsh-litefuse-plugin: requestInput must be full, delta, or none, got ${JSON.stringify(value)}`)
   }
 }
 
@@ -186,7 +186,7 @@ function requestInputScope(value: RequestInputScope | undefined): RequestInputSc
  */
 function credentialRef(value: string): CredentialRef {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) {
-    throw new Error(`dsh-litefuse: credential reference "${value}" must be an environment-variable name`)
+    throw new Error(`dsh-litefuse-plugin: credential reference "${value}" must be an environment-variable name`)
   }
   return value as CredentialRef
 }
@@ -230,10 +230,10 @@ export function apply(ctx: Context, config: Config): void {
   try {
     const parsed = new URL(baseUrl)
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      throw new Error(`dsh-litefuse: baseUrl must be http(s), got ${parsed.protocol}`)
+      throw new Error(`dsh-litefuse-plugin: baseUrl must be http(s), got ${parsed.protocol}`)
     }
   } catch (error) {
-    if (error instanceof TypeError) throw new Error(`dsh-litefuse: baseUrl is not a valid URL: ${JSON.stringify(baseUrl)}`)
+    if (error instanceof TypeError) throw new Error(`dsh-litefuse-plugin: baseUrl is not a valid URL: ${JSON.stringify(baseUrl)}`)
     throw error
   }
   const publicRefs = config.publicKeyEnv === undefined ? PUBLIC_KEY_REFS : [config.publicKeyEnv, ...PUBLIC_KEY_REFS]

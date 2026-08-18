@@ -7,7 +7,7 @@
  * The trace and root-container name is the one capitalized exception — it is a
  * title.
  *
- * @module dsh-litefuse/naming
+ * @module dsh-litefuse-plugin/naming
  */
 
 /** Longest key-info fragment allowed inside an observation name. */

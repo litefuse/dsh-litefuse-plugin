@@ -7,7 +7,7 @@
  * and the trace spec requires exactly that: a failure here writes a line and
  * returns, never disturbing the agent.
  *
- * @module dsh-litefuse/log
+ * @module dsh-litefuse-plugin/log
  */
 
 import { appendFileSync, mkdirSync, renameSync, statSync } from 'node:fs'

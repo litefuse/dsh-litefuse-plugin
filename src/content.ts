@@ -6,7 +6,7 @@
  * for inputs and outputs, and Anthropic-style token keys for usage. Everything
  * here is a pure read over already-committed session data.
  *
- * @module dsh-litefuse/content
+ * @module dsh-litefuse-plugin/content
  */
 
 import type { ContentBlock, TokenUsage, ToolCallBlock } from '@deepseek-ai/dsh-llm'

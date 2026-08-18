@@ -14,7 +14,7 @@
  * trace appear as soon as the first observation completes rather than at turn
  * end.
  *
- * @module dsh-litefuse/trace
+ * @module dsh-litefuse-plugin/trace
  */
 
 import type { Message, TokenUsage } from '@deepseek-ai/dsh-llm'

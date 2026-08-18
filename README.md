@@ -1,4 +1,4 @@
-# dsh-litefuse
+# dsh-litefuse-plugin
 
 [Litefuse](https://litefuse.cloud) observability for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
 
@@ -25,7 +25,7 @@ Unlike the file-tailing collectors Litefuse ships for other agents, this one run
 ## Install
 
 ```bash
-dsh plugin --profile web add -w dsh-litefuse
+dsh plugin --profile web add -w dsh-litefuse-plugin
 ```
 
 That registers the package as a patch layer in `$DSH_HOME/profiles/web`. Use `--profile <name>` for whichever profile you boot; repeat it per profile.
@@ -33,7 +33,7 @@ That registers the package as a patch layer in `$DSH_HOME/profiles/web`. Use `--
 To install from a local checkout instead, pass its absolute path:
 
 ```bash
-dsh plugin --profile web add -w /absolute/path/to/dsh-litefuse
+dsh plugin --profile web add -w /absolute/path/to/dsh-litefuse-plugin
 ```
 
 Then put your project key pair where the harness can read it — in `~/.dsh/.env`:
@@ -74,7 +74,7 @@ If nothing arrives, that log names the reason — missing credentials, an HTTP s
 ### Uninstall
 
 ```bash
-dsh plugin --profile web remove -w dsh-litefuse
+dsh plugin --profile web remove -w dsh-litefuse-plugin
 ```
 
 `DSH_LITEFUSE_DISABLED=1` turns exporting off without uninstalling.
@@ -169,7 +169,7 @@ Credentials are **references, not values**: configuration names an environment v
 
 **The trace header is repeated, so it stays small.** Every span carries the trace's name, tags, session, and user so the trace is queryable before its root is written. The input is the one header field with no natural size, and repeating it would charge a pasted file once per span, so what rides along is a 4096-character preview — the same text on every span, so whichever one the server folds into the trace record reads alike. The root `agent` span carries the input in full, up to `maxValueChars`.
 
-**It reports itself as an SDK scope.** Batches arrive under the instrumentation scope `langfuse-sdk-dsh-litefuse`. The prefix is what tells the ingest these spans are complete as sent; without it, the server assumes a generic OTel exporter that may not have populated the Langfuse attributes at all and copies the whole raw attribute map into each observation's metadata as `attributes`. That copy is redundant here — every attribute in it is already a first-class field — and unreadable, since it re-encodes the JSON strings that `model.parameters` and `usage_details` are required to be. It is the same claim `x-langfuse-ingestion-version: 4` makes on the wire.
+**It reports itself as an SDK scope.** Batches arrive under the instrumentation scope `langfuse-sdk-dsh-litefuse-plugin`. The prefix is what tells the ingest these spans are complete as sent; without it, the server assumes a generic OTel exporter that may not have populated the Langfuse attributes at all and copies the whole raw attribute map into each observation's metadata as `attributes`. That copy is redundant here — every attribute in it is already a first-class field — and unreadable, since it re-encodes the JSON strings that `model.parameters` and `usage_details` are required to be. It is the same claim `x-langfuse-ingestion-version: 4` makes on the wire.
 
 **It writes its own log.** A booted dsh profile composes no logger plugin, so `ctx.logger` output is invisible. The file at `$DSH_HOME/litefuse.log` is where this integration reports, matching what Litefuse's other integrations do.
 
@@ -219,7 +219,7 @@ To check a real Litefuse deployment without waiting for a model round trip:
 node scripts/send-verification-trace.mjs
 ```
 
-It drives the real Session through a scripted turn — one tool call plus a delegated subagent run — and posts the result to `$LITEFUSE_BASE_URL`, tagged `environment: development` and named `dsh-litefuse-verify — Turn 1` so it cannot be mistaken for agent traffic. Read it back with [`litefuse-cli`](https://www.npmjs.com/package/litefuse-cli):
+It drives the real Session through a scripted turn — one tool call plus a delegated subagent run — and posts the result to `$LITEFUSE_BASE_URL`, tagged `environment: development` and named `dsh-litefuse-plugin-verify — Turn 1` so it cannot be mistaken for agent traffic. Read it back with [`litefuse-cli`](https://www.npmjs.com/package/litefuse-cli):
 
 ```bash
 npx -y litefuse-cli api traces get <traceId>

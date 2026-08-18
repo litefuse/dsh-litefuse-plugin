@@ -123,7 +123,7 @@ describe('plugin composition', () => {
   const inherited = new Map<string, string | undefined>()
   // The integration's own log defaults into the real harness home; tests keep
   // it in a temporary file so a run never writes to the developer's ~/.dsh.
-  const logFile = join(tmpdir(), 'dsh-litefuse-test.log')
+  const logFile = join(tmpdir(), 'dsh-litefuse-plugin-test.log')
 
   beforeEach(async () => {
     fake = new FakeLitefuse()
@@ -202,7 +202,7 @@ describe('plugin composition', () => {
     // complete, so it does not fall back to copying the raw attribute map into
     // observation metadata. Renaming the scope without that prefix puts an
     // unreadable duplicate of every attribute back on every observation.
-    expect(payload.resourceSpans[0]!.scopeSpans[0]!.scope.name).toBe('langfuse-sdk-dsh-litefuse')
+    expect(payload.resourceSpans[0]!.scopeSpans[0]!.scope.name).toBe('langfuse-sdk-dsh-litefuse-plugin')
   })
 
   it('writes each span exactly once', async () => {

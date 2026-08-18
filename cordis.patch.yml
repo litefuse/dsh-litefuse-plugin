@@ -1,4 +1,4 @@
-# dsh-litefuse: Litefuse observability as a profile patch layer.
+# dsh-litefuse-plugin: Litefuse observability as a profile patch layer.
 #
 # The plugin only listens on the session firehose, so it composes beside the
 # harness's own telemetry rows instead of replacing them — nothing else in the
@@ -14,7 +14,7 @@
 
 - insert:
     - id: litefuse
-      name: 'dsh-litefuse'
+      name: 'dsh-litefuse-plugin'
       config:
         # Quoted: a bare leading `!` reads as a second YAML tag, and a bare
         # `? :` ternary reads as YAML's explicit-key syntax.

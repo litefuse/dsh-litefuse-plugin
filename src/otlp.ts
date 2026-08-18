@@ -15,7 +15,7 @@
  * tracer-and-context API cannot express for spans whose parent outlives them in
  * a different session.
  *
- * @module @deepseek-ai/dsh-session-telemetry-litefuse/otlp
+ * @module dsh-litefuse-plugin/otlp
  */
 
 import { randomBytes } from 'node:crypto'
