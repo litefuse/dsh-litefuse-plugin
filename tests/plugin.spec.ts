@@ -1,5 +1,6 @@
 import { readFileSync, rmSync } from 'node:fs'
 import { createServer, type Server } from 'node:http'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AddressInfo } from 'node:net'
@@ -198,6 +199,13 @@ describe('plugin composition', () => {
     const payload = fake.captures[0]!.payload
     const resource = payload.resourceSpans[0]!.resource.attributes
     expect(resource.find(entry => entry.key === 'service.name')?.value['stringValue']).toBe('deepseek-harness')
+    // The observed application's version is unknowable from here, and this
+    // package's version is not it — carrying one would assert a harness release
+    // that does not exist.
+    expect(resource.find(entry => entry.key === 'service.version')).toBeUndefined()
+    // The observer's version belongs to the instrumentation scope instead.
+    expect(payload.resourceSpans[0]!.scopeSpans[0]!.scope.version)
+      .toBe(createRequire(import.meta.url)('../package.json').version)
     // The `langfuse-sdk` prefix is what tells the ingest these spans arrive
     // complete, so it does not fall back to copying the raw attribute map into
     // observation metadata. Renaming the scope without that prefix puts an

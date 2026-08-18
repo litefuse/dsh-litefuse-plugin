@@ -255,7 +255,14 @@ export function apply(ctx: Context, config: Config): void {
     onFailure: message => log.warn(message),
     onSuccess: message => log.debug(message),
   }, {
-    resource: { 'service.name': 'deepseek-harness', 'service.version': version },
+    // `service.*` describes the application being observed, not the observer.
+    // Its version is deliberately absent: the harness keeps it in
+    // `@deepseek-ai/dsh-llm`'s manifest and exposes it through no service, so a
+    // plugin that imports nothing at runtime cannot read it — and stamping this
+    // package's version there would assert a `deepseek-harness` release that
+    // does not exist. The observer's own version rides the instrumentation
+    // scope below, which is where OTel puts it.
+    resource: { 'service.name': 'deepseek-harness' },
     scopeName: SCOPE_NAME,
     scopeVersion: version,
   })
