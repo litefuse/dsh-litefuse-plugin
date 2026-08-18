@@ -11,17 +11,20 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # Lets npm attach a provenance attestation linking the tarball to this
-      # workflow run and commit, and is what Trusted Publishing authenticates
-      # with when the package is configured for it.
+      # The OIDC identity npm authenticates as. Trusted publishing exchanges it
+      # for a short-lived credential, so no long-lived token exists to leak or
+      # rotate, and the account's 2FA is never bypassed.
       id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
-          node-version: 22
-          cache: npm
+          # Trusted publishing needs npm >= 11.5.1, which Node 24 bundles and
+          # Node 22 does not. CI still builds on 22, the floor `engines` allows.
+          node-version: 24
           registry-url: https://registry.npmjs.org
+          # A release must resolve from the registry, never from a warm cache.
+          package-manager-cache: false
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
@@ -36,7 +39,6 @@ jobs:
             exit 1
           fi
       # `prepack` builds, so the tarball carries lib/ and the installer never
-      # compiles anything.
-      - run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # compiles anything. Provenance is attached automatically under trusted
+      # publishing — the `--provenance` flag is for token-authenticated runs.
+      - run: npm publish --access public

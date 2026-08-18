@@ -1,6 +1,6 @@
 # dsh-litefuse-plugin
 
-[Litefuse](https://litefuse.cloud) observability for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
+DeepSeek Harness [Litefuse](https://litefuse.ai) Plugin for Agent Observability and Evals.
 
 Every user turn becomes one trace: an `agent` root, one `generation` per model call with real latency and token usage, one `tool` per tool execution, and a nested container for every subagent the turn delegated to. It implements the [Litefuse agent-trace spec v1.2](https://litefuse.ai/litefuse-agent-trace-spec.md).
 
@@ -25,15 +25,17 @@ Unlike the file-tailing collectors Litefuse ships for other agents, this one run
 ## Install
 
 ```bash
-dsh plugin --profile web add -w dsh-litefuse-plugin
+npx @deepseek-ai/dsh plugin --profile web add -w dsh-litefuse-plugin
 ```
 
 That registers the package as a patch layer in `$DSH_HOME/profiles/web`. Use `--profile <name>` for whichever profile you boot; repeat it per profile.
 
+The `npx` form matches how dsh's own quickstart runs it, so it works without a global install; `dsh plugin …` is identical if you have one. Plugin installation forwards to pnpm, so pnpm must be on PATH — booting dsh does not need it.
+
 To install from a local checkout instead, pass its absolute path:
 
 ```bash
-dsh plugin --profile web add -w /absolute/path/to/dsh-litefuse-plugin
+npx @deepseek-ai/dsh plugin --profile web add -w /absolute/path/to/dsh-litefuse-plugin
 ```
 
 Then put your project key pair where the harness can read it — in `~/.dsh/.env`:
@@ -50,7 +52,7 @@ Restart dsh. There is nothing else to configure.
 ### Verify
 
 ```bash
-DSH_LITEFUSE_DEBUG=1 dsh web
+DSH_LITEFUSE_DEBUG=1 npx @deepseek-ai/dsh web
 ```
 
 Send one message, then read the integration's own log:
@@ -74,7 +76,7 @@ If nothing arrives, that log names the reason — missing credentials, an HTTP s
 ### Uninstall
 
 ```bash
-dsh plugin --profile web remove -w dsh-litefuse-plugin
+npx @deepseek-ai/dsh plugin --profile web remove -w dsh-litefuse-plugin
 ```
 
 `DSH_LITEFUSE_DISABLED=1` turns exporting off without uninstalling.
