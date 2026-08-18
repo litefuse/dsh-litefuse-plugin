@@ -141,6 +141,21 @@ export function toolObservationName(
   return info.length === 0 ? `tool: ${toolName} #${stepIndex}` : `tool: ${toolName} (${info}) #${stepIndex}`
 }
 
+/**
+ * Name one `run_code` sub-dispatch: `tool: <name> (<key info>)`.
+ *
+ * Deliberately carries no `#N`. The step number is the container's flat
+ * sequence of model calls and the tool executions they requested; a dispatch
+ * belongs to neither — it is work nested inside one of those steps.
+ * @param toolName - the tool the program invoked.
+ * @param args - the dispatched arguments, used for key info.
+ * @returns the observation name.
+ */
+export function dispatchObservationName(toolName: string, args: unknown): string {
+  const info = toolKeyInfo(toolName, args)
+  return info.length === 0 ? `tool: ${toolName}` : `tool: ${toolName} (${info})`
+}
+
 /** What an assistant step primarily did, which is what its name states. */
 export interface GenerationShape {
   /** How many tool calls the step requested. */

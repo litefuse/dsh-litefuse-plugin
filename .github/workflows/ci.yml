@@ -21,6 +21,9 @@ jobs:
       # The published artifact must load with no compilation and no runtime
       # dependency beyond Node itself: a plugin that pulled in its own copy of
       # Cordis would give the host two Context classes and break service wiring.
+      # The published artifact must load with no compilation and no runtime
+      # dependency beyond Node itself: a plugin that pulled in its own copy of
+      # Cordis would give the host two Context classes and break service wiring.
       - name: Assert the built plugin has no external runtime imports
         run: |
           node --input-type=module -e '
@@ -28,7 +31,12 @@ jobs:
             const offenders = []
             for (const file of readdirSync("lib").filter(f => f.endsWith(".js"))) {
               const source = readFileSync(`lib/${file}`, "utf8")
-              for (const [, specifier] of source.matchAll(/from\s+"([^"]+)"/g)) {
+              // Every form that reaches the module graph, not just `from "x"`:
+              // a side-effect import, a dynamic import, and require() all load
+              // code just as surely, and all three slipped past the older check.
+              for (const [, specifier] of source.matchAll(
+                /(?:^|[\s;{(=])(?:import|require)\s*\(?\s*["\x27]([^"\x27]+)["\x27]|\bfrom\s*["\x27]([^"\x27]+)["\x27]/g,
+              ).map(m => [m[0], m[1] ?? m[2]])) {
                 if (!specifier.startsWith("node:") && !specifier.startsWith(".")) {
                   offenders.push(`${file} -> ${specifier}`)
                 }

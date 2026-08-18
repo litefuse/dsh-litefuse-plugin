@@ -328,6 +328,63 @@ describe('trace assembly', () => {
     expect(attribute(spans[spans.length - 1]!, 'langfuse.observation.input')).toHaveLength(50_000)
   })
 
+  it('shows the tools a run_code program dispatched, which never reach tool/call', async () => {
+    // A program that calls tools bypasses `tool/call` entirely, so without
+    // these the whole run is one opaque `run_code` span however much it drove.
+    const { ctx, spans } = await observe()
+    const writer = new TurnWriter(createSession(ctx), 1)
+    writer.start().prompt('count the sources').header()
+    const step = writer.openStep()
+    writer.assistant(step, [{ type: 'tool-call', id: call('rc'), name: 'run_code', arguments: '{}' }])
+    const seq = writer.toolCall(step, 'rc', 'run_code', { code: 'ls()' })
+    for (const [n, tool, args] of [[1, 'bash', { command: 'ls -la' }], [2, 'read', { file_path: '/tmp/a.txt' }]] as const) {
+      writer.session.append('tool/code-dispatch-start', {
+        rootCallId: call('rc'), parentCallId: call('rc'), subCallId: call(`rc:code:${n}`),
+        name: tool, arguments: args,
+      })
+      writer.session.append('tool/code-dispatch', {
+        rootCallId: call('rc'), parentCallId: call('rc'), subCallId: call(`rc:code:${n}`),
+        name: tool, arguments: args,
+        isError: false, content: [{ type: 'text', text: `${tool} done` }],
+      })
+    }
+    writer.toolResult(step, 'rc', seq, 'program finished').closeStep(step)
+    const answerStep = writer.openStep()
+    writer.assistant(answerStep, [{ type: 'text', text: 'nine' }])
+    writer.closeStep(answerStep).end()
+
+    const dispatches = spans.filter(span => metadataOf(span)['agent_code_dispatch'] === true)
+    expect(dispatches.map(span => span.name)).toEqual(['tool: bash (ls)', 'tool: read (a.txt)'])
+    // Nested under the call that ran them, not flat beside it.
+    const runCode = spans.find(span => span.name.startsWith('tool: run_code'))!
+    for (const span of dispatches) expect(span.parentSpanId).toBe(runCode.spanId)
+    expect(metadataOf(dispatches[0]!)['agent_root_call_id']).toBe('rc')
+    // Counted apart from model-requested calls, so `agent_tool_calls` keeps
+    // meaning what it always meant.
+    const root = spans[spans.length - 1]!
+    expect(metadataOf(root)['agent_tool_calls']).toBe(1)
+    expect(metadataOf(root)['agent_code_dispatches']).toBe(2)
+  })
+
+  it('closes a dispatch the turn ended underneath', async () => {
+    const { ctx, spans } = await observe()
+    const writer = new TurnWriter(createSession(ctx), 1)
+    writer.start().prompt('run it').header()
+    const step = writer.openStep()
+    writer.assistant(step, [{ type: 'tool-call', id: call('rc'), name: 'run_code', arguments: '{}' }])
+    writer.toolCall(step, 'rc', 'run_code', { code: 'slow()' })
+    writer.session.append('tool/code-dispatch-start', {
+      rootCallId: call('rc'), parentCallId: call('rc'), subCallId: call('rc:code:1'),
+      name: 'bash', arguments: { command: 'sleep 60' },
+    })
+    writer.end({ kind: 'aborted', reason: { kind: 'user' } } as never)
+
+    const dispatch = spans.find(span => metadataOf(span)['agent_code_dispatch'] === true)!
+    expect(attribute(dispatch, 'langfuse.observation.level')).toBe('WARNING')
+    expect(attribute(dispatch, 'langfuse.observation.status_message'))
+      .toBe('turn ended before the dispatched tool completed')
+  })
+
   it('ignores events for a turn it never saw open', async () => {
     const { ctx, spans } = await observe()
     const session = createSession(ctx)

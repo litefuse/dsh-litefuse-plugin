@@ -17,10 +17,11 @@
  * @module dsh-litefuse-plugin/trace
  */
 
-import type { Message, TokenUsage } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-compaction'
 import type {} from '@deepseek-ai/dsh-subagent'
+import type {} from '@deepseek-ai/dsh-tools/types'
 import {
   assistantOutput,
   reasoningChars,
@@ -30,7 +31,7 @@ import {
   visibleText,
   type SerializedValue,
 } from './content.js'
-import { generationObservationName, toolObservationName, traceName } from './naming.js'
+import { dispatchObservationName, generationObservationName, toolObservationName, traceName } from './naming.js'
 import { newSpanId, newTraceId, type LitefuseSpan, type SpanAttributeValue } from './otlp.js'
 
 /** How much of a model request one generation observation carries as its input. */
@@ -97,6 +98,21 @@ type Binding =
   }
 
 /**
+ * One `run_code` sub-dispatch in flight: a tool the model's program invoked
+ * rather than requested through a `tool/call`.
+ */
+interface DispatchState {
+  spanId: string
+  startMillis: number
+  /** Call this dispatch is nested inside — a `run_code` call, or another dispatch. */
+  parentCallId: string
+  /** The `run_code` call at the root of the dispatch tree. */
+  rootCallId: string
+  name: string
+  args: unknown
+}
+
+/**
  * One numbering and parenting scope: a turn's root `agent` span, or a
  * subagent container mounted under a delegation tool span. Both own a step
  * counter, an input, and the observations still open inside them.
@@ -125,6 +141,8 @@ interface Scope {
   stepIndex: number
   apiCalls: number
   toolCalls: number
+  /** Tool executions dispatched from inside a `run_code` program. */
+  codeDispatches: number
   /** Trace input, already cut to the configured character budget. */
   input: string
   /** Length {@link input} had before the budget cut it; absent when it fit. */
@@ -139,6 +157,12 @@ interface Scope {
   planSteps: Map<number, number>
   /** Open tool executions by call id. */
   tools: Map<string, ToolState>
+  /**
+   * Open `run_code` sub-dispatches by sub-call id — tool executions a program
+   * started, which never appear as `tool/call`. Kept apart from {@link tools}
+   * because they are nested inside a call rather than steps of the loop.
+   */
+  dispatches: Map<string, DispatchState>
   /** Messages appended since the last generation closed, for `delta` request input. */
   pendingInput: Message[]
   /** Running token totals for this scope and every container beneath it. */
@@ -283,6 +307,12 @@ export class TraceAssembler {
       case 'compaction/end':
         this.onCompaction(state, event.data.error, event.time)
         return
+      case 'tool/code-dispatch-start':
+        this.onDispatchStart(state, event.data, event.time)
+        return
+      case 'tool/code-dispatch':
+        this.onDispatchEnd(state, event.data, event.time)
+        return
       case 'subagent/descriptor':
         // A provider that appends the descriptor live rather than seeding it.
         // It lands before the run's first request, so the label is available
@@ -386,6 +416,7 @@ export class TraceAssembler {
       stepIndex: 0,
       apiCalls: 0,
       toolCalls: 0,
+      codeDispatches: 0,
       input: '',
       inputTruncatedFrom: undefined,
       inputFromUser: false,
@@ -393,6 +424,7 @@ export class TraceAssembler {
       generations: new Map(),
       planSteps: new Map(),
       tools: new Map(),
+      dispatches: new Map(),
       pendingInput: [],
       usage: emptyUsage(),
     }
@@ -668,6 +700,104 @@ export class TraceAssembler {
     })
   }
 
+  /**
+   * Open one `run_code` sub-dispatch.
+   *
+   * A program that calls tools does not go through `tool/call`, so without
+   * these a `run_code` step is one opaque span however much work it drove.
+   * They are recorded as nested spans rather than loop steps because that is
+   * what they are: the bridge drains every in-flight dispatch before the
+   * parent call returns, so the enclosure holds by construction.
+   */
+  private onDispatchStart(
+    state: SessionState,
+    data: { rootCallId: unknown; parentCallId: unknown; subCallId: unknown; name: string; arguments: unknown },
+    timeMillis: number,
+  ): void {
+    const scope = state.scope
+    if (scope === undefined) return
+    scope.endMillis = timeMillis
+    scope.codeDispatches += 1
+    scope.dispatches.set(String(data.subCallId), {
+      spanId: newSpanId(),
+      startMillis: timeMillis,
+      parentCallId: String(data.parentCallId),
+      rootCallId: String(data.rootCallId),
+      name: data.name,
+      args: data.arguments,
+    })
+  }
+
+  /** Close one `run_code` sub-dispatch with the outcome the program saw. */
+  private onDispatchEnd(
+    state: SessionState,
+    data: { subCallId: unknown; content?: readonly ContentBlock[]; isError?: boolean },
+    timeMillis: number,
+  ): void {
+    const scope = state.scope
+    if (scope === undefined) return
+    scope.endMillis = timeMillis
+    const id = String(data.subCallId)
+    const dispatch = scope.dispatches.get(id)
+    if (dispatch === undefined) return
+    scope.dispatches.delete(id)
+    this.emitDispatch(state, scope, id, dispatch, timeMillis, data.isError === true,
+      serializeValue(visibleText(data.content ?? []), this.options.maxValueChars), undefined)
+  }
+
+  /**
+   * Write one sub-dispatch span beneath the call that ran it. The parent is the
+   * enclosing `run_code` call, or another dispatch when a program nested them.
+   */
+  private emitDispatch(
+    state: SessionState,
+    scope: Scope,
+    subCallId: string,
+    dispatch: DispatchState,
+    endMillis: number,
+    isError: boolean,
+    output: SerializedValue | undefined,
+    interrupted: string | undefined,
+  ): void {
+    const parent = scope.tools.get(dispatch.parentCallId)?.spanId
+      ?? scope.dispatches.get(dispatch.parentCallId)?.spanId
+    const input = serializeValue(dispatch.args, this.options.maxValueChars)
+    this.emit({
+      traceId: this.bindingOf(state, scope).traceId,
+      spanId: dispatch.spanId,
+      // A dispatch whose parent call already closed still belongs to the scope;
+      // parenting it there keeps it in the tree rather than orphaning it.
+      parentSpanId: parent ?? scope.spanId,
+      name: dispatchObservationName(dispatch.name, dispatch.args),
+      startTimeMillis: dispatch.startMillis,
+      endTimeMillis: endMillis,
+      attributes: {
+        ...this.commonAttributes(state, scope),
+        'langfuse.observation.type': 'tool',
+        'langfuse.observation.input': input.text,
+        'langfuse.observation.output': output === undefined || output.text.length === 0 ? undefined : output.text,
+        'langfuse.observation.level': interrupted !== undefined ? 'WARNING' : isError ? 'ERROR' : undefined,
+        'langfuse.observation.status_message': interrupted ?? (isError && output !== undefined ? output.text.slice(0, 500) : undefined),
+        ...metadata(OBSERVATION_METADATA, {
+          tool_name: dispatch.name,
+          tool_call_id: subCallId,
+          parent_call_id: dispatch.parentCallId,
+          root_call_id: dispatch.rootCallId,
+          turn_number: scope.turn,
+          duration_ms: endMillis - dispatch.startMillis,
+          // Distinguishes a program-driven call from one the model requested,
+          // so `agent_tool_calls` keeps meaning what it always meant.
+          code_dispatch: true,
+          is_error: isError ? true : undefined,
+          input_truncated: input.truncated ? true : undefined,
+          input_orig_len: input.truncated ? input.originalLength : undefined,
+          output_truncated: output?.truncated === true ? true : undefined,
+          output_orig_len: output?.truncated === true ? output.originalLength : undefined,
+        }),
+      },
+    })
+  }
+
   /** Close one tool execution, first closing any subagent container it hosted. */
   private onToolResult(state: SessionState, session: Session, event: Extract<SessionEvent, { type: 'tool/result' }>): void {
     const scope = state.scope
@@ -815,6 +945,11 @@ export class TraceAssembler {
         },
       })
     }
+    for (const [subCallId, dispatch] of scope.dispatches) {
+      scope.dispatches.delete(subCallId)
+      this.emitDispatch(state, scope, subCallId, dispatch, closeAt, false, undefined,
+        'turn ended before the dispatched tool completed')
+    }
     for (const [callId, tool] of scope.tools) {
       scope.tools.delete(callId)
       // A delegation that never reported a result still owns live containers;
@@ -859,6 +994,7 @@ export class TraceAssembler {
       model: state.model,
       api_calls: scope.apiCalls,
       tool_calls: scope.toolCalls,
+      code_dispatches: scope.codeDispatches === 0 ? undefined : scope.codeDispatches,
       steps: scope.stepIndex,
       duration_ms: closeAt - scope.startMillis,
       context_window: state.contextWindow,
