@@ -1,6 +1,6 @@
 {
   "name": "dsh-litefuse-plugin",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Litefuse observability for DeepSeek Harness: every user turn becomes one agent trace with per-call generations, tool spans, and subagent subtrees",
   "type": "module",
   "main": "lib/index.js",
